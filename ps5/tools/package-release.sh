@@ -48,7 +48,7 @@ The port (patches, SDL3 drivers, disc reader, platform layer, build)
   $(git -C "$root" remote get-url origin 2>/dev/null || echo "this repository")
   $(git -C "$root" rev-parse HEAD)
 The game's code: SwitchWaker (MIT) and the decompilation it compiles (CC0-1.0),
-with ps5/patches/switchwaker.patch
+with ps5/patches/switchwaker.patch$([[ -s $ps5/patches/splitscreen.patch ]] && echo " and ps5/patches/splitscreen.patch (split-screen co-op)")
   https://github.com/centollOS/SwitchWaker
   $(git -C "$upstream" rev-parse HEAD)
 Sound: Dolphin's DSP HLE (GPL-2.0-or-later), fetched by SwitchWaker's

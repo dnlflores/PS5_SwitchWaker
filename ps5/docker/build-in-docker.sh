@@ -86,8 +86,11 @@ PS5_VULKAN_DIR=$W/PS5_Vulkan PS5_PAYLOAD_SDK_FORK=$W/PS5_PayloadSDK PS5_BUILD_DI
 step "the title folder"
 title_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["titleId"])' ps5/sce_sys/param.json)
 [[ -f dist/$title_id/eboot.bin ]] || { echo "no dist/$title_id/eboot.bin" >&2; exit 1; }
+# SOURCE.txt beside eboot.bin (where the GPL source is) and the release zip, for the version given.
+PS5_VULKAN_DIR=$W/PS5_Vulkan bash ps5/tools/package-release.sh "${RELEASE_VERSION:-1.0.3-splitscreen}"
 mkdir -p /out/dist
 rsync -a --delete "dist/$title_id/" "/out/dist/$title_id/"
+cp dist/WindWaker-PS5-v*.zip /out/dist/ 2>/dev/null || true
 find "/out/dist/$title_id" -maxdepth 2 | sort | head -40
 du -sh "/out/dist/$title_id"
 step "done: dist/$title_id"
