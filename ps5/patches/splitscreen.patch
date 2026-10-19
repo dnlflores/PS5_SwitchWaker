@@ -1,0 +1,3971 @@
+diff --git a/docs/SPLITSCREEN.md b/docs/SPLITSCREEN.md
+new file mode 100644
+index 0000000..10b5171
+--- /dev/null
++++ b/docs/SPLITSCREEN.md
+@@ -0,0 +1,75 @@
++# Split-screen co-op
++
++Two players on one console: Player 1 is the Link the game always has, Player 2 a second Link on
++controller 2. Each has their own camera and half of the screen (side by side), and either player can
++move the story on. PC-only (`TARGET_PC`); the GameCube code paths are unchanged.
++
++## Turning it on
++
++Options menu (Minus on the Switch, the touch pad on the PS5, F1 or L+R+Z on the Mac) > Graphics >
++**Split-screen co-op**: *Two players*. Player 2 joins the next time Player 1 is free to move (not in
++a cutscene or a menu), next to Player 1, and leaves when it is turned off. On the PS5, controller 2 is
++the second signed-in user (a guest is fine). The setting is `COS_SPLITSCREEN=1` in `settings.ini` or
++the environment.
++
++Split-screen turns 60 fps interpolation off (it follows one camera); the game runs at its own 30.
++
++## Colours
++
++Graphics > **Player 1's tunic** / **Player 2's tunic**: a colour for each player's clothes (the
++hero's tunic and cap, or the shirt Link wears on Outset at the start): the game's own, red, blue,
++purple, gold, orange, pink, black, white or green. Player 1 keeps the game's own colours by default,
++Player 2 is red, so the two are told apart from the start. Only the clothes change: face, hair,
++belt and boots keep the game's colours (`native/src/pc/game_hooks/pc_splitscreen_tunic.cpp`).
++
++## How the two players share one game
++
++- **The lead.** The world follows one player at a time, the *lead*: the NPCs, events, doors, rooms,
++  music and menus see the lead's Link as "the player", and cutscenes are shown full screen through the
++  lead's camera. Player 1 leads when a scene starts. Whoever talks to someone, opens a door or a
++  chest, gets an item or presses Start becomes the lead, so either player can move the story on.
++- **Cutscenes.** While the lead is in a cutscene, a talk or a menu, the other player waits (hidden)
++  and the screen shows the lead alone; the split comes back when it ends.
++- **Stages.** Only the lead changes the stage (doors to other places, exits, warps, void-outs): if the
++  other player walks into an exit, Player 2 is brought back next to Player 1, or Player 1 is moved
++  next to Player 2. Player 2 is created again in every new stage, next to Player 1.
++- **Staying together.** A player who gets too far from the lead (about 2000 units on foot, 8000 when
++  sailing) or into another room is brought back the same way.
++- **Boats.** When Player 1's boat (the King of Red Lions) is out, Player 2 gets a boat of their own
++  beside it, which they board and sail like Player 1. Only Player 1's boat talks.
++- **Hearts.** The players share the hearts, rupees, items and magic of the save. Only Player 1's hits
++  cost hearts; Player 2 is knocked back but loses none.
++- **Items.** Either player picks up rupees, hearts and items. The restart point is the lead's.
++- **Lock-on.** Each player has their own lock-on (Z targeting); the Links are not each other's
++  targets.
++
++## Limits
++
++- One HUD over both halves: the hearts and the item buttons are the shared save's; the button
++  prompts (A, R) are the lead's.
++- The baton (Wind Waker songs), the telescope and the Picto Box overlay are whole-screen effects
++  of one player at a time.
++- Each Link's blinking and burn/curse effects are shared (cosmetic).
++- The sea's waves and the islands load around the lead.
++
++## Implementation map
++
++- `native/include/pc/pc_splitscreen_ctx.h`: the player context. Index 0 of the per-player tables
++  (player, camera, pad) means the player whose code runs; 0 and 1 swap for Player 2.
++- `native/include/pc/pc_splitscreen.h`, `native/src/pc/game_hooks/pc_splitscreen.cpp`: Player 2's
++  Link, camera and boat, ownership of processes, the lead, the leash, the setting.
++- `game/include/d/d_com_inf_game.h`: a second slot in the window, camera, player and player-status
++  tables, Player 2's Link and boat pointers and lock-on; accessors go through the context.
++- `game/src/f_pc/f_pc_method.cpp`, `f_pc_draw.cpp`, `f_pc_base.cpp`: each process runs in its
++  player's context; what a player's process creates is that player's.
++- `game/src/m_Do/m_Do_graphic.cpp`: the painter draws each half through its camera, copies it out
++  and puts the two side by side; the second half re-enters the 3D scene into the draw lists
++  (`pc_ss_redraw_scene_for_window`) without advancing animations, particles or paint-time effects.
++- `game/src/d/d_camera.cpp`: Player 2's camera (the game's unused second camera profile); only the
++  camera being drawn sets the view, only the lead's is the sound listener.
++- `game/src/d/actor/d_a_player_main.cpp`: per-Link state that was file-static, the model data both
++  Links share, Player 2's start (no opening cutscene, restart point or boat start).
++- `game/src/d/d_event.cpp`, `d_event_manager.cpp`, `d_demo.cpp`, `d_stage.cpp`,
++  `d_com_inf_game.cpp`: the lead rules for events, cutscene casting and stage changes.
++- `game/src/d/actor/d_a_ship.cpp`, `d_a_grid.cpp`, `game/src/f_op/f_op_actor_mng.cpp`: Player 2's
++  boat and its sail.
+diff --git a/game/include/d/actor/d_a_grid.h b/game/include/d/actor/d_a_grid.h
+index b5bca76..2e9ac4f 100644
+--- a/game/include/d/actor/d_a_grid.h
++++ b/game/include/d/actor/d_a_grid.h
+@@ -83,6 +83,10 @@ public:
+     /* 0x2212 */ s16 field_0x2212;
+     /* 0x2214 */ s16 field_0x2214;
+     /* 0x2216 */ s16 mForceWindRelAngle;
++#if TARGET_PC
++    // Split-screen: the boat this sail is on (each player has one).
++    class daShip_c* mSsShip;
++#endif
+     /* 0x2218 */ u8 mIsForceWindRelAngle;
+ };
+ 
+diff --git a/game/include/d/actor/d_a_player_main.h b/game/include/d/actor/d_a_player_main.h
+index 938f3b5..fcc268d 100644
+--- a/game/include/d/actor/d_a_player_main.h
++++ b/game/include/d/actor/d_a_player_main.h
+@@ -1017,6 +1017,15 @@ public:
+     void offBodyEffect();
+     void onBodyEffect();
+     BOOL draw();
++#if TARGET_PC
++    // Split-screen: both Links use the model data in Link's archive, and each hangs its own
++    // animation state on it (the joints' blend tables, the face's material animations). Each puts
++    // its own back before it animates or draws (pc_splitscreen.h).
++    void ssSnapshotSharedModelData();
++    void ssRebindSharedModelData();
++    J3DMaterialAnm* mSsMatAnm[64];
++    u16 mSsMatNum;
++#endif
+     void setAtnList();
+     void setActorPointer();
+     BOOL setTalkStatus();
+@@ -1148,6 +1157,9 @@ public:
+     int debugCurProc() const;
+     int debugEquipItem() const;
+     void debugPlace(const cXyz& pos, s16 angleY);
++    // Split-screen: the tunic colour (native/src/pc/game_hooks/pc_splitscreen_tunic.cpp) copies
++    // the body model's texture table with the clothes entry recoloured.
++    J3DModelData* pcBodyModelData() const { return mpCLModelData; }
+ #endif
+     BOOL procSlip_init();
+     BOOL procSlip();
+diff --git a/game/include/d/d_com_inf_game.h b/game/include/d/d_com_inf_game.h
+index fcebdd9..c340b69 100644
+--- a/game/include/d/d_com_inf_game.h
++++ b/game/include/d/d_com_inf_game.h
+@@ -19,6 +19,19 @@
+ #include "helpers/endian.h"
+ #include "d/d_demo.h"
+ #include "d/d_timer.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen_ctx.h"
++#include "pc/pc_splitscreen.h"
++#define SS_REMAP_PLAYER(i) (pc_ss_remap_player(i))
++#define SS_REMAP_CAMERA(i) (pc_ss_remap_camera(i))
++#define SS_SECONDARY() (pc_ss_in_p2())
++#else
++#define SS_REMAP_PLAYER(i) (i)
++#define SS_REMAP_CAMERA(i) (i)
++#define SS_SECONDARY() (false)
++#endif
++#define CAMINFO(i) (mCameraInfo[SS_REMAP_CAMERA(i)])
++#define PLAYERINFO(i) (mPlayerInfo[SS_REMAP_PLAYER(i)])
+ 
+ #include "res/Object/Always.h" // IWYU pragma: export
+ 
+@@ -208,42 +221,47 @@ public:
+     void drawWood();
+ 
+     BOOL checkCameraAttentionStatus(int idx, u32 i_flag) {
+-        return mCameraInfo[idx].mCameraAttentionStatus & i_flag;
++        return CAMINFO(idx).mCameraAttentionStatus & i_flag;
+     }
+-    u32 getCameraAttentionStatus(int i) { return mCameraInfo[i].mCameraAttentionStatus; }
+-    void setCameraAttentionStatus(int i, u32 i_flag) { mCameraInfo[i].mCameraAttentionStatus = i_flag; }
+-    void onCameraAttentionStatus(int i, u32 i_flag) { mCameraInfo[i].mCameraAttentionStatus |= i_flag; }
++    u32 getCameraAttentionStatus(int i) { return CAMINFO(i).mCameraAttentionStatus; }
++    void setCameraAttentionStatus(int i, u32 i_flag) { CAMINFO(i).mCameraAttentionStatus = i_flag; }
++    void onCameraAttentionStatus(int i, u32 i_flag) { CAMINFO(i).mCameraAttentionStatus |= i_flag; }
+     void offCameraAttentionStatus(int i, u32 i_flag) {
+-        mCameraInfo[i].mCameraAttentionStatus &= ~i_flag;
++        CAMINFO(i).mCameraAttentionStatus &= ~i_flag;
+     }
+ 
+-    void setCamera(int i, camera_class* cam) { mCameraInfo[i].mpCamera = cam; }
++    void setCamera(int i, camera_class* cam) { CAMINFO(i).mpCamera = cam; }
+     void setCameraInfo(int idx, camera_class* camera_p, int dlst_window_idx, int player1_camera_id, int player2_camera_id) {
+-        mCameraInfo[idx].mpCamera = camera_p;
+-        mCameraInfo[idx].mDlstWindowIdx = dlst_window_idx;
+-        mCameraInfo[idx].mCamP1Id = player1_camera_id;
+-        mCameraInfo[idx].mCamP2Id = player2_camera_id;
++        CAMINFO(idx).mpCamera = camera_p;
++        CAMINFO(idx).mDlstWindowIdx = dlst_window_idx;
++        CAMINFO(idx).mCamP1Id = SS_REMAP_PLAYER(player1_camera_id);
++        CAMINFO(idx).mCamP2Id = SS_REMAP_PLAYER(player2_camera_id);
++#if TARGET_PC
++        // Split-screen: the original cleared camera 0's flags whatever the index.
++        setCameraAttentionStatus(idx, 0);
++#else
+         setCameraAttentionStatus(0, 0);
++#endif
+     }
+ 
+-    f32 getCameraZoomForcus(int i_no) { return mCameraInfo[i_no].mCameraZoomForcus; }
+-    void setCameraZoomForcus(int i_no, f32 i_focus) { mCameraInfo[i_no].mCameraZoomForcus = i_focus; }
++    f32 getCameraZoomForcus(int i_no) { return CAMINFO(i_no).mCameraZoomForcus; }
++    void setCameraZoomForcus(int i_no, f32 i_focus) { CAMINFO(i_no).mCameraZoomForcus = i_focus; }
+ 
+-    f32 getCameraZoomScale(int i_no) { return mCameraInfo[i_no].mCameraZoomScale; }
+-    void setCameraZoomScale(int i_no, f32 i_scale) { mCameraInfo[i_no].mCameraZoomScale = i_scale; }
++    f32 getCameraZoomScale(int i_no) { return CAMINFO(i_no).mCameraZoomScale; }
++    void setCameraZoomScale(int i_no, f32 i_scale) { CAMINFO(i_no).mCameraZoomScale = i_scale; }
+ 
+     void saveCameraPosition(int i, cXyz* i_pos, cXyz* i_target, f32 i_fovy, s16 i_bank) {
+-        mCameraInfo[i].mCameraPos = *i_pos;
+-        mCameraInfo[i].mCameraTarget = *i_target;
+-        mCameraInfo[i].mCameraFovy = i_fovy;
+-        mCameraInfo[i].mCameraBank = i_bank;
++        CAMINFO(i).mCameraPos = *i_pos;
++        CAMINFO(i).mCameraTarget = *i_target;
++        CAMINFO(i).mCameraFovy = i_fovy;
++        CAMINFO(i).mCameraBank = i_bank;
+     }
+ 
+     void loadCameraPosition(int i, cXyz* o_pos, cXyz* o_target, f32* o_fovy, s16* o_bank) {
+-        *o_pos = mCameraInfo[i].mCameraPos;
+-        *o_target = mCameraInfo[i].mCameraTarget;
+-        *o_fovy = mCameraInfo[i].mCameraFovy;
+-        *o_bank = mCameraInfo[i].mCameraBank;
++        *o_pos = CAMINFO(i).mCameraPos;
++        *o_target = CAMINFO(i).mCameraTarget;
++        *o_fovy = CAMINFO(i).mCameraFovy;
++        *o_bank = CAMINFO(i).mCameraBank;
+     }
+     void setMesgCamInfoBasicID(int id) { mMesgCamInfo.mBasicID = id; }
+     dComIfG_MesgCamInfo_c* getMesgCamInfo() { return &mMesgCamInfo; }
+@@ -271,10 +289,17 @@ public:
+     dEvent_manager_c& getEvtManager() { return mEvtManager; }
+     dPa_control_c* getParticle() { return mParticle; }
+     dVibration_c& getVibration() { return mVibration; }
++#if TARGET_PC
++    // Split-screen: Player 2 has a lock-on of their own.
++    dAttention_c& getAttention() {
++        return (SS_SECONDARY() && mpPlayer2Attention != NULL) ? *mpPlayer2Attention : mAttention;
++    }
++#else
+     dAttention_c& getAttention() { return mAttention; }
++#endif
+     dDetect_c& getDetect() { return mDetect; }
+     dDemo_manager_c* getDemo() { return mDemo; }
+-    camera_class* getCamera(int idx) { return mCameraInfo[idx].mpCamera; }
++    camera_class* getCamera(int idx) { return CAMINFO(idx).mpCamera; }
+ 
+     dMagma_packet_c* getMagma() { return mpMagmaPacket; }
+     dGrass_packet_c* getGrass() { return mpGrassPacket; }
+@@ -314,19 +339,54 @@ public:
+     u8 getGameoverStatus() { return mGameoverStatus; }
+     void setGameoverStatus(u8 stts) { mGameoverStatus = stts; }
+ 
+-    fopAc_ac_c* getPlayer(int idx) { return mPlayerInfo[idx].mpPlayer; }
+-    void setPlayer(int idx, fopAc_ac_c* player) { mPlayerInfo[idx].mpPlayer = player; }
+-    int getPlayerCameraID(int idx) { return mPlayerInfo[idx].mCameraID; }
++    fopAc_ac_c* getPlayer(int idx) { return PLAYERINFO(idx).mpPlayer; }
++    void setPlayer(int idx, fopAc_ac_c* player) { PLAYERINFO(idx).mpPlayer = player; }
++    int getPlayerCameraID(int idx) { return SS_REMAP_CAMERA(PLAYERINFO(idx).mCameraID); }
+     void setPlayerInfo(int idx, fopAc_ac_c* player, int cam) {
++        PLAYERINFO(idx).mpPlayer = player;
++        PLAYERINFO(idx).mCameraID = SS_REMAP_CAMERA(cam);
++    }
++
++#if TARGET_PC
++    // Split-screen: index 0 is Link and 2 the ship; Player 2 has slots of their own for both
++    // (the partner, 1, is shared).
++    fopAc_ac_c* getPlayerPtr(int idx) {
++        if (SS_SECONDARY() && (idx == 0 || idx == 2)) {
++            return idx == 0 ? mPlayer2LinkPtr : mPlayer2ShipPtr;
++        }
++        return (fopAc_ac_c*)mpPlayerPtr[idx];
++    }
++    void setPlayerPtr(int idx, fopAc_ac_c* playerPtr) {
++        if (SS_SECONDARY() && (idx == 0 || idx == 2)) {
++            (idx == 0 ? mPlayer2LinkPtr : mPlayer2ShipPtr) = playerPtr;
++        } else {
++            mpPlayerPtr[idx] = playerPtr;
++        }
++    }
++
++    // Split-screen: physical access, for the code that looks after both players.
++    camera_class* getCameraPhysical(int idx) { return mCameraInfo[idx].mpCamera; }
++    fopAc_ac_c* getPlayerPhysical(int idx) { return mPlayerInfo[idx].mpPlayer; }
++    fopAc_ac_c* getLinkPhysical(int player) { return player == 0 ? mpPlayerPtr[0] : mPlayer2LinkPtr; }
++    fopAc_ac_c* getShipPhysical(int player) { return player == 0 ? mpPlayerPtr[2] : mPlayer2ShipPtr; }
++    void setPlayerInfoPhysical(int idx, fopAc_ac_c* player, int cam) {
+         mPlayerInfo[idx].mpPlayer = player;
+         mPlayerInfo[idx].mCameraID = cam;
+     }
+-
++    void setCameraInfoPhysical(int idx, camera_class* camera_p, int win, int player1, int player2) {
++        mCameraInfo[idx].mpCamera = camera_p;
++        mCameraInfo[idx].mDlstWindowIdx = win;
++        mCameraInfo[idx].mCamP1Id = player1;
++        mCameraInfo[idx].mCamP2Id = player2;
++        mCameraInfo[idx].mCameraAttentionStatus = 0;
++    }
++#else
+     fopAc_ac_c* getPlayerPtr(int idx) { return (fopAc_ac_c*)mpPlayerPtr[idx]; }
+     void setPlayerPtr(int idx, fopAc_ac_c* playerPtr) { mpPlayerPtr[idx] = playerPtr; }
+-    int getCameraPlayer1ID(int i) { return mCameraInfo[i].mCamP1Id; }
+-    int getCameraPlayer2ID(int i) { return mCameraInfo[i].mCamP2Id; }
+-    int getCameraWinID(int i) { return mCameraInfo[i].mDlstWindowIdx; }
++#endif
++    int getCameraPlayer1ID(int i) { return SS_REMAP_PLAYER(CAMINFO(i).mCamP1Id); }
++    int getCameraPlayer2ID(int i) { return SS_REMAP_PLAYER(CAMINFO(i).mCamP2Id); }
++    int getCameraWinID(int i) { return CAMINFO(i).mDlstWindowIdx; }
+ 
+     s16 getItemTimer() { return mItemTimer; }
+     void resetItemTimer(s16 timer) {
+@@ -502,9 +562,9 @@ public:
+     u8 checkMesgCancelButton() { return mMesgCancelButton; }
+     void setMesgCancelButton(u8 button) { mMesgCancelButton = button; }
+ 
+-    void setPlayerStatus(int param_0, int i, u32 flag) { mPlayerStatus[param_0][i] |= flag; }
+-    void clearPlayerStatus(int param_0, int i, u32 flag) { mPlayerStatus[param_0][i] &= ~flag; }
+-    u32 checkPlayerStatus(int param_0, int i, u32 flag) { return mPlayerStatus[param_0][i] & flag; }
++    void setPlayerStatus(int param_0, int i, u32 flag) { mPlayerStatus[SS_REMAP_PLAYER(param_0)][i] |= flag; }
++    void clearPlayerStatus(int param_0, int i, u32 flag) { mPlayerStatus[SS_REMAP_PLAYER(param_0)][i] &= ~flag; }
++    u32 checkPlayerStatus(int param_0, int i, u32 flag) { return mPlayerStatus[SS_REMAP_PLAYER(param_0)][i] & flag; }
+ 
+     u8 getSelectItem(int idx) { return mSelectItem[idx]; }
+     void setSelectItem(int idx, u8 itemNo) { mSelectItem[idx] = itemNo; }
+@@ -781,6 +841,20 @@ public:
+     /* 0x4840 */ s8 mLkDArcIdx;
+     /* 0x4841 */ u8 mDlstWindowNum;
+     /* 0x4842 */ u16 mStatus;
++#if TARGET_PC
++    // Split-screen: the per-window, per-camera and per-player tables have a second slot, Player
++    // 2's (STATIC_ASSERT is off on PC and nothing reads these by offset).
++    dDlst_window_c mDlstWindow[2];
++    dComIfG_camera_info_class mCameraInfo[2];
++    struct {
++        fopAc_ac_c* mpPlayer;
++        s8 mCameraID;
++    } mPlayerInfo[2];
++    fopAc_ac_c* mpPlayerPtr[3];  // 0: Link, 1: Partner, 2: Ship
++    fopAc_ac_c* mPlayer2LinkPtr;
++    fopAc_ac_c* mPlayer2ShipPtr;
++    dAttention_c* mpPlayer2Attention;
++#else
+     /* 0x4844 */ dDlst_window_c mDlstWindow[1];
+     /* 0x4870 */ dComIfG_camera_info_class mCameraInfo[1];
+     /* 0x48A4 */ struct {
+@@ -788,6 +862,7 @@ public:
+         /* 0x4 */ s8 mCameraID;
+     } mPlayerInfo[1];
+     /* 0x48AC */ fopAc_ac_c* mpPlayerPtr[3];  // 0: Link, 1: Partner, 2: Ship
++#endif
+     /* 0x48B8 */ f32 mItemScopeWipeScale;
+     /* 0x48BC */ f32 mItemLifeCount;
+     /* 0x48C0 */ s32 mItemRupeeCount;
+@@ -881,7 +956,11 @@ public:
+     /* 0x49B0 */ u8 mPlayerInfoBuffer[sizeof(dSv_player_status_c_c)];
+     /* 0x4A20 */ u8 mPlayerInfoBufferStageNo;
+     /* 0x4A24 */ daAgb_c* mpAgb;
++#if TARGET_PC
++    u32 mPlayerStatus[2][4];
++#else
+     /* 0x4A28 */ u32 mPlayerStatus[1][4];
++#endif
+     /* 0x4A38 */ u16 mMinigameFlags;
+     /* 0x4A3A */ u8 mMiniGameType;
+     /* 0x4A3C */ s16 mMiniGameRupee;
+@@ -1401,10 +1480,20 @@ inline s16 dComIfGs_getStartPoint() {
+ }
+ 
+ inline void dComIfGs_setRestartRoom(const cXyz& i_pos, s16 i_angle, s8 i_roomNo) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getRestart().setRoom(i_pos, i_angle, i_roomNo);
+ }
+ 
+ inline void dComIfGs_setRestartRoomParam(u32 i_param) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getRestart().setRoomParam(i_param);
+ }
+ 
+@@ -1441,10 +1530,20 @@ inline u32 dComIfGs_getLastSceneMode() {
+ }
+ 
+ inline void dComIfGs_setRestartOption(s8 i_option) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getRestart().setRestartOption(i_option);
+ }
+ 
+ inline void dComIfGs_setRestartOption(cXyz* i_pos, s16 i_angle, s8 i_roomNo, s8 i_option) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getRestart().setRestartOption(i_option, i_pos, i_angle, i_roomNo);
+     g_dComIfG_gameInfo.save.getPlayer().getPriest().set(i_option, *i_pos, i_angle, i_roomNo);
+ }
+@@ -1502,19 +1601,39 @@ inline void dComIfGs_setTurnRestartHasShip(BOOL hasShip) {
+ 
+ #if VERSION == VERSION_DEMO
+ inline void dComIfGs_setTurnRestart(const cXyz& i_pos, s16 i_angle, s8 i_roomNo, u32 i_param) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getTurnRestart().set(i_pos, i_angle, i_roomNo, i_param, i_pos, i_angle);
+ }
+ 
+ inline void dComIfGs_setTurnRestart(const cXyz& i_pos, s16 i_angle, s8 i_roomNo, u32 i_param, const cXyz& i_shipPos, s16 i_shipAngle) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getTurnRestart().set(i_pos, i_angle, i_roomNo, i_param, i_shipPos, i_shipAngle);
+ }
+ #else
+ inline void dComIfGs_setTurnRestart(const cXyz& i_pos, s16 i_angle, s8 i_roomNo, u32 i_param) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getTurnRestart().set(i_pos, i_angle, i_roomNo, i_param, i_pos, i_angle, FALSE);
+ }
+ 
+ // Note: The "BOOL i_hasShip" parameter doesn't exist in the demo, but was added for the final release.
+ inline void dComIfGs_setTurnRestart(const cXyz& i_pos, s16 i_angle, s8 i_roomNo, u32 i_param, const cXyz& i_shipPos, s16 i_shipAngle, BOOL i_hasShip) {
++#if TARGET_PC
++    // Split-screen: the restart point is the lead's.
++    if (pc_ss_block_global_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.save.getTurnRestart().set(i_pos, i_angle, i_roomNo, i_param, i_shipPos, i_shipAngle, i_hasShip);
+ }
+ #endif
+diff --git a/game/include/d/d_drawlist.h b/game/include/d/d_drawlist.h
+index e7d59de..2e705db 100644
+--- a/game/include/d/d_drawlist.h
++++ b/game/include/d/d_drawlist.h
+@@ -348,6 +348,13 @@ class dKy_tevstr_c;
+ class dDlst_shadowReal_c {
+ public:
+     void reset();
++#if TARGET_PC
++    // Split-screen: see dDlst_shadowControl_c::resetForView.
++    void resetForView() {
++        mpDrawBuffer->frameInit();
++        mModelNum = 0;
++    }
++#endif
+     void imageDraw(Mtx);
+     void draw();
+     u32 set(u32, s8, J3DModel*, cXyz*, f32, f32, dKy_tevstr_c*);
+@@ -386,6 +393,11 @@ private:
+ class dDlst_shadowControl_c {
+ public:
+     dDlst_shadowControl_c() { mRealNum = 0; }
++#if TARGET_PC
++    // Split-screen: empties the shadow lists for the second view but keeps each real shadow's
++    // slot, so the shadows cast in both views keep theirs (reset() would free them).
++    void resetForView();
++#endif
+     void init();
+     void reset();
+     void imageDraw(Mtx);
+@@ -520,6 +532,23 @@ class dDlst_list_c {
+ public:
+     dDlst_list_c();
+     ~dDlst_list_c();
++#if TARGET_PC
++    // Split-screen: the 3D lists are filled again for the second view; the 2D ones are kept.
++    struct Cursors2D {
++        dDlst_base_c** copy2D;
++        dDlst_base_c** opaTop2D;
++        dDlst_base_c** opa2D;
++        dDlst_base_c** xlu2D;
++    };
++    Cursors2D save2DCursors() const { return {mpCopy2D, mp2DOpaTop, mp2DOpa, mp2DXlu}; }
++    void restore2DCursors(const Cursors2D& c) {
++        mpCopy2D = c.copy2D;
++        mp2DOpaTop = c.opaTop2D;
++        mp2DOpa = c.opa2D;
++        mp2DXlu = c.xlu2D;
++    }
++    void reset3D();
++#endif
+ 
+     bool init();
+     void reset();
+diff --git a/game/include/m_Do/m_Do_controller_pad.h b/game/include/m_Do/m_Do_controller_pad.h
+index cea179b..4ba28f2 100644
+--- a/game/include/m_Do/m_Do_controller_pad.h
++++ b/game/include/m_Do/m_Do_controller_pad.h
+@@ -4,70 +4,78 @@
+ #include "JSystem/JUtility/JUTGamePad.h"
+ #include "SSystem/SComponent/c_API_controller_pad.h"
+ 
++#if TARGET_PC
++#include "pc/pc_splitscreen_ctx.h"
++// Split-screen: while Player 2's processes run, pad 0 means controller 2.
++#define MDOCPD_PAD(pad) (pc_ss_remap_pad(pad))
++#else
++#define MDOCPD_PAD(pad) (pad)
++#endif
++
+ // Controller Ports 1 - 4
+ enum { PAD_1, PAD_2, PAD_3, PAD_4 };
+ 
+ extern JUTGamePad* g_mDoCPd_gamePad[4];
+ extern interface_of_controller_pad g_mDoCPd_cpadInfo[4];
+ 
+-#define CPad_CHECK_HOLD_A(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.a)
+-#define CPad_CHECK_HOLD_B(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.b)
+-#define CPad_CHECK_HOLD_X(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.x)
+-#define CPad_CHECK_HOLD_Y(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.y)
+-#define CPad_CHECK_HOLD_Z(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.z)
+-#define CPad_CHECK_HOLD_START(padNo) (g_mDoCPd_cpadInfo[padNo].mButtonHold.start)
+-#define CPad_CHECK_HOLD_L(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.l)
+-#define CPad_CHECK_HOLD_R(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonHold.r)
+-#define CPad_CHECK_HOLD_UP(padNo)    (g_mDoCPd_cpadInfo[padNo].mButtonHold.up)
+-#define CPad_CHECK_HOLD_DOWN(padNo)  (g_mDoCPd_cpadInfo[padNo].mButtonHold.down)
+-#define CPad_CHECK_HOLD_RIGHT(padNo) (g_mDoCPd_cpadInfo[padNo].mButtonHold.right)
+-#define CPad_CHECK_HOLD_LEFT(padNo)  (g_mDoCPd_cpadInfo[padNo].mButtonHold.left)
+-
+-#define CPad_CHECK_TRIG_A(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.a)
+-#define CPad_CHECK_TRIG_B(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.b)
+-#define CPad_CHECK_TRIG_X(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.x)
+-#define CPad_CHECK_TRIG_Y(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.y)
+-#define CPad_CHECK_TRIG_Z(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.z)
+-#define CPad_CHECK_TRIG_START(padNo) (g_mDoCPd_cpadInfo[padNo].mButtonTrig.start)
+-#define CPad_CHECK_TRIG_L(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.l)
+-#define CPad_CHECK_TRIG_R(padNo)     (g_mDoCPd_cpadInfo[padNo].mButtonTrig.r)
+-#define CPad_CHECK_TRIG_UP(padNo)    (g_mDoCPd_cpadInfo[padNo].mButtonTrig.up)
+-#define CPad_CHECK_TRIG_DOWN(padNo)  (g_mDoCPd_cpadInfo[padNo].mButtonTrig.down)
+-#define CPad_CHECK_TRIG_RIGHT(padNo) (g_mDoCPd_cpadInfo[padNo].mButtonTrig.right)
+-#define CPad_CHECK_TRIG_LEFT(padNo)  (g_mDoCPd_cpadInfo[padNo].mButtonTrig.left)
+-
+-#define CPad_GET_STICK_POS_X(padNo) (g_mDoCPd_cpadInfo[padNo].mMainStickPosX)
+-#define CPad_GET_STICK_POS_Y(padNo) (g_mDoCPd_cpadInfo[padNo].mMainStickPosY)
+-#define CPad_GET_STICK_VALUE(padNo) (g_mDoCPd_cpadInfo[padNo].mMainStickValue)
+-#define CPad_GET_STICK_ANGLE(padNo) (g_mDoCPd_cpadInfo[padNo].mMainStickAngle)
+-
+-#define CPad_GET_SUBSTICK_POS_X(padNo) (g_mDoCPd_cpadInfo[padNo].mCStickPosX)
+-#define CPad_GET_SUBSTICK_POS_Y(padNo) (g_mDoCPd_cpadInfo[padNo].mCStickPosY)
+-#define CPad_GET_SUBSTICK_VALUE(padNo) (g_mDoCPd_cpadInfo[padNo].mCStickValue)
+-#define CPad_GET_SUBSTICK_ANGLE(padNo) (g_mDoCPd_cpadInfo[padNo].mCStickAngle)
+-
+-#define CPad_GET_ANALOG_L(padNo) (g_mDoCPd_cpadInfo[padNo].mTriggerLeft)
+-#define CPad_GET_ANALOG_R(padNo) (g_mDoCPd_cpadInfo[padNo].mTriggerRight)
+-
+-#define CPad_GET_ERROR_STATUS(padNo) (g_mDoCPd_cpadInfo[padNo].mGamepadErrorFlags)
++#define CPad_CHECK_HOLD_A(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.a)
++#define CPad_CHECK_HOLD_B(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.b)
++#define CPad_CHECK_HOLD_X(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.x)
++#define CPad_CHECK_HOLD_Y(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.y)
++#define CPad_CHECK_HOLD_Z(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.z)
++#define CPad_CHECK_HOLD_START(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.start)
++#define CPad_CHECK_HOLD_L(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.l)
++#define CPad_CHECK_HOLD_R(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.r)
++#define CPad_CHECK_HOLD_UP(padNo)    (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.up)
++#define CPad_CHECK_HOLD_DOWN(padNo)  (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.down)
++#define CPad_CHECK_HOLD_RIGHT(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.right)
++#define CPad_CHECK_HOLD_LEFT(padNo)  (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonHold.left)
++
++#define CPad_CHECK_TRIG_A(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.a)
++#define CPad_CHECK_TRIG_B(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.b)
++#define CPad_CHECK_TRIG_X(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.x)
++#define CPad_CHECK_TRIG_Y(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.y)
++#define CPad_CHECK_TRIG_Z(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.z)
++#define CPad_CHECK_TRIG_START(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.start)
++#define CPad_CHECK_TRIG_L(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.l)
++#define CPad_CHECK_TRIG_R(padNo)     (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.r)
++#define CPad_CHECK_TRIG_UP(padNo)    (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.up)
++#define CPad_CHECK_TRIG_DOWN(padNo)  (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.down)
++#define CPad_CHECK_TRIG_RIGHT(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.right)
++#define CPad_CHECK_TRIG_LEFT(padNo)  (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mButtonTrig.left)
++
++#define CPad_GET_STICK_POS_X(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mMainStickPosX)
++#define CPad_GET_STICK_POS_Y(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mMainStickPosY)
++#define CPad_GET_STICK_VALUE(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mMainStickValue)
++#define CPad_GET_STICK_ANGLE(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mMainStickAngle)
++
++#define CPad_GET_SUBSTICK_POS_X(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mCStickPosX)
++#define CPad_GET_SUBSTICK_POS_Y(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mCStickPosY)
++#define CPad_GET_SUBSTICK_VALUE(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mCStickValue)
++#define CPad_GET_SUBSTICK_ANGLE(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mCStickAngle)
++
++#define CPad_GET_ANALOG_L(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mTriggerLeft)
++#define CPad_GET_ANALOG_R(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mTriggerRight)
++
++#define CPad_GET_ERROR_STATUS(padNo) (g_mDoCPd_cpadInfo[MDOCPD_PAD(padNo)].mGamepadErrorFlags)
+ 
+ int mDoCPd_Create();
+ int mDoCPd_Read();
+ 
+ inline bool mDoCPd_L_LOCK_BUTTON(u32 i_padNo) {
+-    return g_mDoCPd_cpadInfo[i_padNo].mHoldLockL;
++    return g_mDoCPd_cpadInfo[MDOCPD_PAD(i_padNo)].mHoldLockL;
+ }
+ 
+ inline bool mDoCPd_L_LOCK_TRIGGER(u32 i_padNo) {
+-    return g_mDoCPd_cpadInfo[i_padNo].mTrigLockL;
++    return g_mDoCPd_cpadInfo[MDOCPD_PAD(i_padNo)].mTrigLockL;
+ }
+ 
+ inline bool mDoCPd_R_LOCK_BUTTON(u32 i_padNo) {
+-    return g_mDoCPd_cpadInfo[i_padNo].mHoldLockR;
++    return g_mDoCPd_cpadInfo[MDOCPD_PAD(i_padNo)].mHoldLockR;
+ }
+ 
+ inline bool mDoCPd_R_LOCK_TRIGGER(u32 i_padNo) {
+-    return g_mDoCPd_cpadInfo[i_padNo].mTrigLockR;
++    return g_mDoCPd_cpadInfo[MDOCPD_PAD(i_padNo)].mTrigLockR;
+ }
+ 
+ inline void mDoCPd_ANALOG_CONV(u8 analog, f32& param_1) {
+diff --git a/game/src/d/actor/d_a_bo.cpp b/game/src/d/actor/d_a_bo.cpp
+index 5a3f59b..685298e 100644
+--- a/game/src/d/actor/d_a_bo.cpp
++++ b/game/src/d/actor/d_a_bo.cpp
+@@ -1094,8 +1094,8 @@ void bo2_move(bo_class* i_this) {
+     daPy_py_c* player = (daPy_py_c*)dComIfGp_getPlayer(0);
+     f32 end;
+     f32 start;
+-    f32 stickX = g_mDoCPd_cpadInfo[0].mMainStickPosX;
+-    f32 stickY = g_mDoCPd_cpadInfo[0].mMainStickPosY;
++    f32 stickX = g_mDoCPd_cpadInfo[MDOCPD_PAD(0)].mMainStickPosX;
++    f32 stickY = g_mDoCPd_cpadInfo[MDOCPD_PAD(0)].mMainStickPosY;
+ 
+     switch (i_this->m2C5) {
+     case 0xA:
+diff --git a/game/src/d/actor/d_a_canon.cpp b/game/src/d/actor/d_a_canon.cpp
+index a858202..fa8e5c1 100644
+--- a/game/src/d/actor/d_a_canon.cpp
++++ b/game/src/d/actor/d_a_canon.cpp
+@@ -447,7 +447,7 @@ void daCanon_c::end_proc() {
+ 
+ /* 00001814-00001A18       .text PadMove__9daCanon_cFv */
+ void daCanon_c::PadMove() {
+-    interface_of_controller_pad* pad = &g_mDoCPd_cpadInfo[0];
++    interface_of_controller_pad* pad = &g_mDoCPd_cpadInfo[MDOCPD_PAD(0)];
+     f32 stickX = pad->mMainStickPosX;
+     f32 stickY = pad->mMainStickPosY;
+     s16 target1 = shape_angle.y;
+diff --git a/game/src/d/actor/d_a_grid.cpp b/game/src/d/actor/d_a_grid.cpp
+index 3f930aa..525d817 100644
+--- a/game/src/d/actor/d_a_grid.cpp
++++ b/game/src/d/actor/d_a_grid.cpp
+@@ -385,6 +385,10 @@ void daHo_packet_c::draw() {
+ 
+ /* 800E9BE8-800E9C0C       .text daGrid_Draw__FP8daGrid_c */
+ static BOOL daGrid_Draw(daGrid_c* i_this) {
++#if TARGET_PC
++    // Split-screen: this sail's boat (l_ship is shared by both sails).
++    l_ship = i_this->mSsShip;
++#endif
+     return ((daGrid_c*)i_this)->_draw();
+ }
+ 
+@@ -652,6 +656,9 @@ void ho_move(daGrid_c* i_this) {
+ 
+ /* 800EA928-800EA94C       .text daGrid_Execute__FP8daGrid_c */
+ static BOOL daGrid_Execute(daGrid_c* i_this) {
++#if TARGET_PC
++    l_ship = i_this->mSsShip;
++#endif
+     return ((daGrid_c*)i_this)->_execute();
+ }
+ 
+@@ -809,6 +816,9 @@ cPhs_State daGrid_c::_create() {
+     }
+ 
+     l_ship = (daShip_c*)fopAcM_SearchByName(fpcNm_SHIP_e);
++#if TARGET_PC
++    mSsShip = l_ship;
++#endif
+     ho_move(this);
+ 
+ #if VERSION == VERSION_DEMO
+diff --git a/game/src/d/actor/d_a_item.cpp b/game/src/d/actor/d_a_item.cpp
+index dc9fe28..38367be 100644
+--- a/game/src/d/actor/d_a_item.cpp
++++ b/game/src/d/actor/d_a_item.cpp
+@@ -124,6 +124,17 @@ void daItem_c::set_mtx_base(J3DModel* pModel, cXyz pos, csXyz rot) {
+ void itemGetCallBack(fopAc_ac_c* item_actor, dCcD_GObjInf*, fopAc_ac_c* collided_actor, dCcD_GObjInf*) {
+     daItem_c* item = (daItem_c*)item_actor;
+     daPy_lk_c* link = daPy_getPlayerLinkActorClass();
++#if TARGET_PC
++    // Split-screen: either player picks items up, as themselves (an item with a get cutscene makes
++    // its finder the lead).
++    if (item && item->checkPlayerGet() && collided_actor && collided_actor != link &&
++        pc_ss_is_player_link(collided_actor)) {
++        const uint8_t who = (uint8_t)pc_ss_link_player(collided_actor);
++        pc_ss_scoped_ctx ss_ctx(who, who);
++        item->itemGetExecute();
++        return;
++    }
++#endif
+     if (item && item->checkPlayerGet() && collided_actor && collided_actor == link) {
+         item->itemGetExecute();
+     }
+diff --git a/game/src/d/actor/d_a_kamome2.cpp b/game/src/d/actor/d_a_kamome2.cpp
+index 896d19d..9d1ba5a 100644
+--- a/game/src/d/actor/d_a_kamome2.cpp
++++ b/game/src/d/actor/d_a_kamome2.cpp
+@@ -75,7 +75,7 @@ static void kamome2_bgcheck(kamome2_class* i_this) {
+ }
+ 
+ static void key_move(kamome2_class* i_this) {
+-    interface_of_controller_pad* pad = &g_mDoCPd_cpadInfo[0];
++    interface_of_controller_pad* pad = &g_mDoCPd_cpadInfo[MDOCPD_PAD(0)];
+     f32 fVar3 = pad->mMainStickPosX;
+     f32 fVar4 = pad->mMainStickPosY;
+     s32 iVar1 = i_this->mpMorf->getFrame();
+diff --git a/game/src/d/actor/d_a_player_main.cpp b/game/src/d/actor/d_a_player_main.cpp
+index e3d8f18..69d0a33 100644
+--- a/game/src/d/actor/d_a_player_main.cpp
++++ b/game/src/d/actor/d_a_player_main.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include "d/dolzel.h" // IWYU pragma: keep
+ #include "d/actor/d_a_player_main.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ #include "d/actor/d_a_demo_item.h"
+ #include "d/actor/d_a_npc_fa1.h"
+ #include "d/actor/d_a_obj_movebox.h"
+@@ -34,6 +37,7 @@
+ #include "m_Do/m_Do_lib.h"
+ #if TARGET_PC
+ #include "helpers/endian.h"
++#include "pc/pc_splitscreen_tunic.h"
+ #endif
+ #include "d/d_material.h"
+ #include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
+@@ -53,10 +57,20 @@ static JGeometry::TVec3<f32> l_hammer_splash_particle_scale(0.67f, 0.67f, 0.67f)
+ #include "d/actor/d_a_player_HIO_data.inc"
+ 
+ #if DEBUG || VERSION > VERSION_DEMO
++#if TARGET_PC
++// Split-screen: one per Link (execute() puts Link back where this says).
++static cXyz l_debug_keep_pos_[2];
++static csXyz l_debug_current_angle_[2];
++static csXyz l_debug_shape_angle_[2];
++#define l_debug_keep_pos (l_debug_keep_pos_[pc_ss_link_player(this)])
++#define l_debug_current_angle (l_debug_current_angle_[pc_ss_link_player(this)])
++#define l_debug_shape_angle (l_debug_shape_angle_[pc_ss_link_player(this)])
++#else
+ static cXyz l_debug_keep_pos;
+ static csXyz l_debug_current_angle;
+ static csXyz l_debug_shape_angle;
+ #endif
++#endif
+ 
+ static GXColor l_freeze_fade_color = {0xFF, 0xFF, 0xFF, 0xFF};
+ 
+@@ -567,10 +581,22 @@ static BOOL daPy_jointCallback1(J3DNode* node, int calcTiming) {
+     return TRUE;
+ }
+ 
++#if TARGET_PC
++// Split-screen: one of each per Link (a packet entered twice in one draw list loops the list).
++static mDoExt_offCupOnAupPacket l_offCupOnAupPacket1_[2];
++static mDoExt_offCupOnAupPacket l_offCupOnAupPacket2_[2];
++static mDoExt_onCupOffAupPacket l_onCupOffAupPacket1_[2];
++static mDoExt_onCupOffAupPacket l_onCupOffAupPacket2_[2];
++#define l_offCupOnAupPacket1 (l_offCupOnAupPacket1_[pc_ss_link_player(this)])
++#define l_offCupOnAupPacket2 (l_offCupOnAupPacket2_[pc_ss_link_player(this)])
++#define l_onCupOffAupPacket1 (l_onCupOffAupPacket1_[pc_ss_link_player(this)])
++#define l_onCupOffAupPacket2 (l_onCupOffAupPacket2_[pc_ss_link_player(this)])
++#else
+ static mDoExt_offCupOnAupPacket l_offCupOnAupPacket1;
+ static mDoExt_offCupOnAupPacket l_offCupOnAupPacket2;
+ static mDoExt_onCupOffAupPacket l_onCupOffAupPacket1;
+ static mDoExt_onCupOffAupPacket l_onCupOffAupPacket2;
++#endif
+ 
+ /* 801041B4-801041EC       .text setAnimeHeap__9daPy_lk_cFP12JKRSolidHeap */
+ JKRHeap* daPy_lk_c::setAnimeHeap(JKRSolidHeap* animeHeap) {
+@@ -1708,7 +1734,37 @@ void daPy_lk_c::onBodyEffect() {
+ }
+ 
+ /* 80107308-80108204       .text draw__9daPy_lk_cFv */
++#if TARGET_PC
++void daPy_lk_c::ssSnapshotSharedModelData() {
++    mSsMatNum = mpCLModelData->getMaterialNum();
++    if (mSsMatNum > ARRAY_SIZE(mSsMatAnm)) {
++        mSsMatNum = ARRAY_SIZE(mSsMatAnm);
++    }
++    for (u16 i = 0; i < mSsMatNum; i++) {
++        mSsMatAnm[i] = mpCLModelData->getMaterialNodePointer(i)->getMaterialAnm();
++    }
++}
++
++void daPy_lk_c::ssRebindSharedModelData() {
++    if (!pc_ss_links_share_model_data() || mpCLModelData == NULL) {
++        return;
++    }
++    mpCLModelData->getJointNodePointer(CL_JNT_LINK_ROOT_e)->setMtxCalc(m_pbCalc[PART_UNDER_e]);
++    mpCLModelData->getJointNodePointer(CL_JNT_BODY_CHN_e)->setMtxCalc(m_pbCalc[PART_UPPER_e]);
++    mpCLModelData->getJointNodePointer(CL_JNT_WAIST_CHN_e)->setMtxCalc(m_pbCalc[PART_UNDER_e]);
++    for (u16 i = 0; i < mSsMatNum; i++) {
++        mpCLModelData->getMaterialNodePointer(i)->setMaterialAnm(mSsMatAnm[i]);
++    }
++}
++#endif
++
+ BOOL daPy_lk_c::draw() {
++#if TARGET_PC
++    ssRebindSharedModelData();
++    // Split-screen: this Link's body model draws with its player's tunic colour (a copy of the
++    // shared texture table, until the draw returns).
++    PcSsTunicDrawScope ssTunic(this, pc_ss_link_player(this));
++#endif
+     if (mSightPacket.getDrawFlg()) {
+         mSightPacket.setSight();
+     }
+@@ -5015,6 +5071,10 @@ void daPy_lk_c::setDamagePoint(f32 amount) {
+ /* 8011029C-80110338       .text setDamagePoint__9daPy_lk_cFf */
+ BOOL daPy_lk_c::setDamagePoint(f32 amount) {
+     if (!checkNoDamageMode()) {
++#if TARGET_PC
++        // Split-screen: Player 2's hits do not cost the hearts both players share.
++        if (!(amount < 0.0f && pc_ss_is_player2(this)))
++#endif
+         dComIfGp_setItemLifeCount(amount);
+         if (amount < 0.0f) {
+             offNoResetFlg1(daPyFlg1_SOUP_POWER_UP);
+@@ -11195,6 +11255,9 @@ void daPy_lk_c::checkRoofRestart() {
+ 
+ /* 80121870-80122D30       .text execute__9daPy_lk_cFv */
+ BOOL daPy_lk_c::execute() {
++#if TARGET_PC
++    ssRebindSharedModelData();
++#endif
+ #if VERSION > VERSION_DEMO
+     if (setGetDemo()) {
+         return TRUE;
+@@ -11360,6 +11423,10 @@ BOOL daPy_lk_c::execute() {
+             animeUpdate();
+         }
+     } else if (!checkNoResetFlg1(daPyFlg1_FREEZE_FADED_IN)) {
++#if TARGET_PC
++        // Split-screen: the screen fade is the lead's.
++        if (!pc_ss_block_global_change())
++#endif
+         mDoGph_gInf_c::fadeIn(0.02f, l_freeze_fade_color);
+         onNoResetFlg1(daPyFlg1_FREEZE_FADED_IN);
+     }
+@@ -11468,6 +11535,10 @@ BOOL daPy_lk_c::execute() {
+         } else {
+             mCurrAttributeCode = dComIfG_Bgsp()->GetAttributeCode(mAcch.m_gnd);
+         }
++#if TARGET_PC
++        // Split-screen: the rooms load around the lead.
++        if (!pc_ss_block_global_change())
++#endif
+         dStage_RoomCheck(&mAcch.m_gnd);
+         checkFallCode();
+         
+@@ -11536,6 +11607,10 @@ BOOL daPy_lk_c::execute() {
+         }
+         
+         u8 groupInfo = dComIfG_Bgsp()->GetGrpSoundId(mAcch.m_gnd);
++#if TARGET_PC
++        // Split-screen: the music follows the lead.
++        if (!pc_ss_block_global_change())
++#endif
+         mDoAud_setLinkGroupInfo(groupInfo);
+     } else {
+         mRestartPoint = 0xFF;
+@@ -11707,14 +11782,23 @@ BOOL daPy_lk_c::execute() {
+     }
+     offNoResetFlg1((daPy_FLG1)(daPyFlg1_UNK4 | daPyFlg1_FORCE_VOMIT_JUMP | daPyFlg1_FORCE_VOMIT_JUMP_SHORT | daPyFlg1_UNK10000000));
+     
++#if TARGET_PC
++    // Split-screen: the sound system hears the lead's Link.
++    const bool ss_audio = !pc_ss_block_global_change();
++#else
++    const bool ss_audio = true;
++#endif
+     if (dComIfGp_checkPlayerStatus0(0, daPyStts0_SHIP_RIDE_e)) {
++        if (ss_audio)
+         mDoAud_setLinkOnBoard(1);
+         fopAcM_OnStatus(this, fopAcStts_UNK4000_e);
+     } else {
++        if (ss_audio)
+         mDoAud_setLinkOnBoard(2);
+         fopAcM_OffStatus(this, fopAcStts_UNK4000_e);
+     }
+     
++    if (ss_audio)
+     mDoAud_setLinkHp(dComIfGs_getLife(), dComIfGs_getMaxLife());
+     
+     mShieldFrontRangeYAngle = shape_angle.y + mBodyAngle.y;
+@@ -11803,7 +11887,15 @@ BOOL daPy_lk_c::playerDelete() {
+     
+     mJAIZelAnime.stop();
+     
+-    if (checkNoResetFlg1(daPyFlg1_CASUAL_CLOTHES)) {
++#if TARGET_PC
++    // Split-screen: this Link's tunic colour copy goes (a few frames later).
++    pc_ss_tunic_on_link_delete(this);
++    // Split-screen: Player 2's Link leaves the clothes and the baton's metronome to Player 1's.
++    const bool ss_p2 = pc_ss_in_p2();
++#else
++    const bool ss_p2 = false;
++#endif
++    if (checkNoResetFlg1(daPyFlg1_CASUAL_CLOTHES) && !ss_p2) {
+         *mpCurrLinktex = mOtherLinktex;
+ #if TARGET_PC
+         // J3DTexture keeps a texture object per entry on the host (J3DTexture.h): the header copy
+@@ -11814,6 +11906,7 @@ BOOL daPy_lk_c::playerDelete() {
+     
+     dComIfGp_clearPlayerStatus0(0, daPyStts0_BOOMERANG_WAIT_e);
+     dComIfGp_clearPlayerStatus1(0, daPyStts1_UNK40000_e);
++    if (!ss_p2)
+     dComIfGp_setMetronomeOff();
+     
+     cancelNoDamageMode();
+@@ -12046,6 +12139,9 @@ BOOL daPy_lk_c::createHeap() {
+     
+     initTextureScroll();
+     initTextureAnime();
++#if TARGET_PC
++    ssSnapshotSharedModelData();
++#endif
+     
+     m_HIO = new daPy_HIO_c();
+     JUT_ASSERT(VERSION_SELECT(21067, 21174, 21254, 21254), m_HIO != NULL);
+@@ -12141,6 +12237,13 @@ J3DAnmTextureSRTKey* daPy_lk_c::entryBtk(J3DModelData* param_1, int param_2) {
+         static_cast<J3DAnmTextureSRTKey*>(dComIfG_getObjectRes(l_arcName, param_2));
+     JUT_ASSERT(VERSION_SELECT(21186, 21293, 21373, 21373), btk_anm != NULL);
+     btk_anm->searchUpdateMaterialID(param_1);
++#if TARGET_PC
++    // Split-screen: Player 2 leaves the animations of the models both Links (and the bombs and
++    // arrows) use in Link's archive as Player 1 set them up: Player 1 outlives Player 2.
++    if (pc_ss_in_p2()) {
++        return btk_anm;
++    }
++#endif
+     param_1->entryTexMtxAnimator(btk_anm);
+     btk_anm->setFrame(0.0f);
+     return btk_anm;
+@@ -12152,6 +12255,12 @@ J3DAnmTevRegKey* daPy_lk_c::entryBrk(J3DModelData* param_1, int param_2) {
+         static_cast<J3DAnmTevRegKey*>(dComIfG_getObjectRes(l_arcName, param_2));
+     JUT_ASSERT(VERSION_SELECT(21208, 21315, 21395, 21395), brk_anm != NULL);
+     brk_anm->searchUpdateMaterialID(param_1);
++#if TARGET_PC
++    // Split-screen: see entryBtk.
++    if (pc_ss_in_p2()) {
++        return brk_anm;
++    }
++#endif
+     param_1->entryTevRegAnimator(brk_anm);
+     brk_anm->setFrame(0.0f);
+     return brk_anm;
+@@ -12374,6 +12483,12 @@ void daPy_lk_c::playerInit() {
+     
+     int startMode = getStartMode();
+     u8 lastMode = dComIfGs_getLastSceneMode();
++#if TARGET_PC
++    // Split-screen: Player 2 joins a scene that has started; its opening cutscene is Player 1's.
++    if (pc_ss_in_p2()) {
++        mEventIdx = 0xFF;
++    } else
++#endif
+     if (startMode == 0xE) {
+         mEventIdx = dComIfGp_evmng_startDemo(0xD4);
+     } else if (startMode == 0xC) {
+@@ -12431,6 +12546,19 @@ void daPy_lk_c::playerInit() {
+             num_linktex_headers_seen += 1;
+             continue;
+         }
++#if TARGET_PC
++        // Split-screen: Player 2 wears what Player 1 wears. The clothes are a swap in the model
++        // data both Links use, done (and undone) by Player 1's Link only.
++        if (pc_ss_in_p2()) {
++            mpCurrLinktex = texture->getResTIMG(tex_no);
++            daPy_lk_c* p1 = (daPy_lk_c*)g_dComIfG_gameInfo.play.getLinkPhysical(0);
++            mOtherLinktex = p1 != NULL ? p1->mOtherLinktex : *mpCurrLinktex;
++            if (p1 != NULL && p1->checkNoResetFlg1(daPyFlg1_CASUAL_CLOTHES)) {
++                onNoResetFlg1(daPyFlg1_CASUAL_CLOTHES);
++            }
++            break;
++        }
++#endif
+         
+         mpCurrLinktex = texture->getResTIMG(tex_no);
+         mOtherLinktex = *mpCurrLinktex;
+@@ -12542,7 +12670,12 @@ cPhs_State daPy_lk_c::makeBgWait() {
+     }
+     setRoomInfo();
+     int startMode = getStartMode();
++#if TARGET_PC
++    // Split-screen: Player 2 arrives on foot, next to Player 1 (the way into the scene was theirs).
++    u8 sceneMode = pc_ss_in_p2() ? 0 : dComIfGs_getLastSceneMode();
++#else
+     u8 sceneMode = dComIfGs_getLastSceneMode();
++#endif
+     if (startMode == 2 || startMode == 9 || sceneMode == 6 || (startMode == 5 && sceneMode == 1) ||
+         (sceneMode == 5 &&
+          (!strcmp(dComIfGp_getStartStageName(), "Pjavdou") || !strcmp(dComIfGp_getStartStageName(), "ShipD") ||
+diff --git a/game/src/d/actor/d_a_sea.cpp b/game/src/d/actor/d_a_sea.cpp
+index 9edb51e..eb036ef 100644
+--- a/game/src/d/actor/d_a_sea.cpp
++++ b/game/src/d/actor/d_a_sea.cpp
+@@ -7,6 +7,7 @@
+ #include "d/actor/d_a_sea.h"
+ #if TARGET_PC
+ #include "pc/game_hooks.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ #include "d/d_com_inf_game.h"
+ #include "d/d_stage.h"
+@@ -723,7 +724,7 @@ void daSea_packet_c::draw() {
+ 
+ #if TARGET_PC
+     // COS_FPS60_TEST's paint B (game_hooks.h): the scroll as paint A left it.
+-    if (!pc_paint_is_extra())
++    if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat())
+ #endif
+     {
+     mAnimCounter += 1;
+diff --git a/game/src/d/actor/d_a_ship.cpp b/game/src/d/actor/d_a_ship.cpp
+index 265274d..ccc4fa5 100644
+--- a/game/src/d/actor/d_a_ship.cpp
++++ b/game/src/d/actor/d_a_ship.cpp
+@@ -3642,6 +3642,10 @@ BOOL daShip_c::execute() {
+                 }
+                 else {
+                     eventInfo.onCondition(dEvtCnd_CANTALK_e);
++#if TARGET_PC
++                    // Split-screen: only Player 1's boat is the King of Red Lions who talks.
++                    if (!pc_ss_in_p2())
++#endif
+                     fopAcM_orderSpeakEvent(this);
+                 }
+             }
+@@ -4224,6 +4228,10 @@ BOOL daShip_c::execute() {
+                 mNextMessageNo != 0xD65
+             )
+         ) {
++#if TARGET_PC
++            // Split-screen: Player 2's boat does not talk.
++            if (!pc_ss_in_p2())
++#endif
+             fopAcM_orderSpeakEvent(this);
+             offStateFlg(daSFLG_UNK400000_e);
+             attention_info.flags |= (fopAc_Attn_LOCKON_TALK_e | fopAc_Attn_ACTION_SPEAK_e);
+@@ -4261,6 +4269,10 @@ BOOL daShip_c::execute() {
+             r24_2 = FALSE;
+         }
+         if (r24_2) {
++#if TARGET_PC
++            // Split-screen: Player 2's boat does not talk.
++            if (!pc_ss_in_p2())
++#endif
+             fopAcM_orderSpeakEvent(this);
+ #if VERSION > VERSION_DEMO
+             eventInfo.onCondition(dEvtCnd_CANTALK_e);
+@@ -4269,6 +4281,12 @@ BOOL daShip_c::execute() {
+             offStateFlg(daSFLG_UNK400000_e);
+         }
+     }
++#if TARGET_PC
++    // Split-screen: Player 2's boat does not talk (the story's talks are with Player 1's).
++    if (pc_ss_in_p2()) {
++        attention_info.flags &= ~(fopAc_Attn_LOCKON_TALK_e | fopAc_Attn_ACTION_SPEAK_e);
++    }
++#endif
+ 
+     mTillerAngleRate = m0366 * (1.0f / 0x2000);
+ 
+@@ -4348,12 +4366,20 @@ BOOL daShip_c::execute() {
+         mSph.ResetTgHit();
+     }
+ 
++#if TARGET_PC
++    // Split-screen: the sailing sound is the lead's boat's.
++    const bool ss_audio = !pc_ss_block_global_change();
++#else
++    const bool ss_audio = true;
++#endif
+     if (mPart == PART_STEER_e) {
+         dComIfGp_setPlayerStatus1(0, daPyStts1_SAIL_e);
++        if (ss_audio)
+         mDoAud_setShipSailState(1);
+     }
+     else {
+         dComIfGp_clearPlayerStatus1(0, daPyStts1_SAIL_e);
++        if (ss_audio)
+         mDoAud_setShipSailState(0);
+     }
+ 
+@@ -4784,7 +4810,12 @@ cPhs_State daShip_c::create() {
+         mWaveR.setMaxSpeed(40.0f);
+         m19C0.mRate = 0.0f;
+ 
+-        if (dStage_stagInfo_GetSTType(dComIfGp_getStage().getStagInfo()) == dStageType_SEA_e) {
++        if (dStage_stagInfo_GetSTType(dComIfGp_getStage().getStagInfo()) == dStageType_SEA_e
++#if TARGET_PC
++            // Split-screen: the things that come up from the sea come around Player 1's boat.
++            && !pc_ss_in_p2()
++#endif
++        ) {
+             fopAcM_createChild(fpcNm_Coming2_e, fopAcM_GetID(this), 0, &current.pos, -1, NULL);
+         }
+     }
+diff --git a/game/src/d/d_attention.cpp b/game/src/d/d_attention.cpp
+index aa96d1b..ae31fae 100644
+--- a/game/src/d/d_attention.cpp
++++ b/game/src/d/d_attention.cpp
+@@ -11,6 +11,9 @@
+ #include "res/Object/Always.h"
+ #include "m_Do/m_Do_controller_pad.h"
+ #include "m_Do/m_Do_graphic.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ 
+ dAttention_c::LocTbl dAttention_c::loc_type_tbl[3] = {
+     { fopAc_Attn_TYPE_MISC_e,   fopAc_Attn_LOCKON_MISC_e   },
+@@ -466,6 +469,12 @@ s32 dAttention_c::makeList() {
+ int dAttention_c::SelectAttention(fopAc_ac_c* ac) {
+     if (ac == mpPlayer || mpPlayer == NULL)
+         return 0;
++#if TARGET_PC
++    // Split-screen: the Links are not each other's targets (every flag is on for Link), nor is
++    // the other player's boat.
++    if (pc_ss_hidden_from(ac, mpPlayer))
++        return 0;
++#endif
+ 
+     mFlagMask = mpPlayer->attention_info.flags;
+ 
+diff --git a/game/src/d/d_camera.cpp b/game/src/d/d_camera.cpp
+index 4239f70..ec0995e 100644
+--- a/game/src/d/d_camera.cpp
++++ b/game/src/d/d_camera.cpp
+@@ -8,6 +8,7 @@
+ #include "pc/pc_aspect.h"
+ #include "pc/pc_harness.h"
+ #include "pc/game_hooks.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ #include "d/d_camera.h"
+ #include "d/d_bg_s_gnd_chk.h"
+@@ -113,7 +114,7 @@ namespace {
+             return true;
+         }
+ 
+-        if (*(u16*)&g_mDoCPd_cpadInfo[padId].mButtonHold) {
++        if (*(u16*)&g_mDoCPd_cpadInfo[MDOCPD_PAD(padId)].mButtonHold) {
+             return true;
+         }
+ 
+@@ -384,6 +385,12 @@ dCamera_c::dCamera_c(camera_class* i_camera) : mCamParam(0) {
+ }
+ /* 801618B8-80161994       .text __dt__9dCamera_cFv */
+ dCamera_c::~dCamera_c() {
++#if TARGET_PC
++    // Split-screen: Player 2's camera going does not end the stop the lead's event put on.
++    if (pc_ss_current_owner() == 1) {
++        return;
++    }
++#endif
+     fopAc_ac_c::setStopStatus(0);
+ }
+ 
+@@ -818,7 +825,7 @@ void dCamera_c::updateMonitor() {
+ 
+         mMonitor.mPos = playerPos;
+ 
+-        if (!m144 && *(u16*)&g_mDoCPd_cpadInfo[0].mButtonHold == 0 && mStickMainValueLast < 0.05f && mStickCValueLast < 0.05f) {
++        if (!m144 && *(u16*)&g_mDoCPd_cpadInfo[MDOCPD_PAD(0)].mButtonHold == 0 && mStickMainValueLast < 0.05f && mStickCValueLast < 0.05f) {
+             mMonitor.field_0x18++;
+         }
+         else {
+@@ -7900,7 +7907,8 @@ static void preparation(camera_process_class* i_this) {
+ #if TARGET_PC
+     // Widescreen (pc_aspect.h): the camera aspect (.sdata2 0x803FA998, 4/3 -> 16/9) sets the
+     // projection and mDoLib_clipper's frustum, so the view and its culling both widen.
+-    f32 aspect = pc_aspect_ratio() * fapGmHIO_getAspectRatio();
++    // Split-screen: each view gets its share of the screen's width (or height).
++    f32 aspect = pc_aspect_ratio() * fapGmHIO_getAspectRatio() * pc_ss_aspect_scale();
+ #else
+     f32 aspect = (4.0f/3.0f) * fapGmHIO_getAspectRatio();
+ #endif
+@@ -7924,6 +7932,14 @@ static void view_setup(camera_process_class* i_this) {
+     view->mViewMtxNoTrans[1][3] = 0.0f;
+     view->mViewMtxNoTrans[2][3] = 0.0f;
+ 
++#if TARGET_PC
++    // Split-screen: only the camera of the view being drawn (Player 1's while the screen is
++    // split) sets the view the actors are culled and drawn against; the painter sets Player 2's
++    // for their half.
++    if (!pc_ss_is_pass_camera(a_this)) {
++        return;
++    }
++#endif
+     dComIfGd_setWindow(window);
+     dComIfGd_setViewport(viewport);
+     dComIfGd_setView(view);
+@@ -8061,9 +8077,21 @@ static bool camera_draw(camera_process_class* i_this) {
+     C_MTXPerspective(i_this->view.mProjMtx, i_this->view.mFovy, i_this->view.mAspect, i_this->view.mNear, i_this->view.mFar);
+     mDoMtx_lookAt(i_this->view.mViewMtx, &i_this->view.mLookat.mEye, &i_this->view.mLookat.mCenter, &i_this->view.mLookat.mUp, i_this->view.mBank);
+ 
++#if TARGET_PC
++    // Split-screen: the draw pass is drawn for one camera (see view_setup), and the sound
++    // listener is the lead's camera (the sound system has one listener).
++    const bool ss_pass_camera = pc_ss_is_pass_camera(a_this);
++    if (ss_pass_camera) {
++        j3dSys.setViewMtx(i_this->view.mViewMtx);
++    }
++    cMtx_inverse(i_this->view.mViewMtx, i_this->view.mInvViewMtx);
++    if (pc_ss_is_audio_camera(a_this)) {
++    mDoAud_getCameraInfo(fopCamM_GetEye_p(a_this), i_this->view.mViewMtx, camera_id);
++#else
+     j3dSys.setViewMtx(i_this->view.mViewMtx);
+     cMtx_inverse(i_this->view.mViewMtx, i_this->view.mInvViewMtx);
+     mDoAud_getCameraInfo(fopCamM_GetEye_p(a_this), j3dSys.getViewMtx(), camera_id);
++#endif
+ 
+     dBgS_GndChk gndchk;
+     gndchk.SetPos(&i_this->view.mLookat.mEye);
+@@ -8082,6 +8110,9 @@ static bool camera_draw(camera_process_class* i_this) {
+     } else {
+         mDoAud_zelAudio_c::getInterface()->setCameraPolygonPos(NULL);
+     }
++#if TARGET_PC
++    }  // Split-screen: the lead's camera
++#endif
+ 
+     MTXCopy(i_this->view.mViewMtx, i_this->view.mViewMtxNoTrans);
+     i_this->view.mViewMtxNoTrans[0][3] = 0.0f;
+@@ -8090,7 +8121,9 @@ static bool camera_draw(camera_process_class* i_this) {
+     cMtx_concatProjView(i_this->view.mProjMtx, i_this->view.mViewMtx, i_this->view.mProjViewMtx);
+ #if TARGET_PC
+     // COS_FPS60_TEST step B (pc_fps60_camera.cpp): this draw pass's camera, for paint B's blend.
+-    pc_fps60_camera_drawn(&i_this->view);
++    if (ss_pass_camera) {
++        pc_fps60_camera_drawn(&i_this->view);
++    }
+ #endif
+ 
+     body->Draw();
+@@ -8131,6 +8164,13 @@ static cPhs_State init_phase1(camera_class* i_this) {
+     
+     Vec local_18 = {10000000.0f, 10000000.0f, 10000000.0f};
+ 
++#if TARGET_PC
++    // Split-screen: Player 2's camera (parameter 1) joins a running scene: it neither takes the
++    // sound listener (there is one) nor turns the 3D off until it is ready.
++    if (fpcM_GetParam(i_this) != 0) {
++        return cPhs_NEXT_e;
++    }
++#endif
+     mDoAud_getCameraInfo(&local_18, j3dSys.getViewMtx(), camera_id);
+ 
+     dComIfGp_setWindowNum(0);
+@@ -8152,6 +8192,10 @@ static cPhs_State init_phase2(camera_class* i_this) {
+ 
+     fopAcM_setStageLayer(player);
+     
++#if TARGET_PC
++    // Split-screen: see init_phase1.
++    if (fpcM_GetParam(i_this) == 0)
++#endif
+     dComIfGp_setWindowNum(1);
+     
+     new (body) dCamera_c(i_this);
+@@ -8170,7 +8214,12 @@ static cPhs_State init_phase2(camera_class* i_this) {
+     fopCamM_SetNear(i_this, 1.0f);
+     fopCamM_SetFar(i_this, farPlane);
+     fopCamM_SetFovy(i_this, 30.0f);
++#if TARGET_PC
++    // Split-screen: each view gets its share of the screen (see preparation).
++    fopCamM_SetAspect(i_this, viewPort->mWidth / viewPort->mHeight * fapGmHIO_getAspectRatio() * pc_ss_aspect_scale());
++#else
+     fopCamM_SetAspect(i_this, viewPort->mWidth / viewPort->mHeight * fapGmHIO_getAspectRatio());
++#endif
+     fopCamM_SetCenter(i_this, player->current.pos.x, player->current.pos.y, player->current.pos.z);
+     fopCamM_SetBank(i_this, 0);
+         
+diff --git a/game/src/d/d_com_inf_game.cpp b/game/src/d/d_com_inf_game.cpp
+index 08d94dc..0d0266b 100644
+--- a/game/src/d/d_com_inf_game.cpp
++++ b/game/src/d/d_com_inf_game.cpp
+@@ -69,6 +69,12 @@ void dComIfG_play_c::init() {
+     for (int i = 0; i < ARRAY_SIZE(mpPlayerPtr); i++) {
+         mpPlayerPtr[i] = NULL;
+     }
++#if TARGET_PC
++    // Split-screen: Player 2's slots.
++    mPlayer2LinkPtr = NULL;
++    mPlayer2ShipPtr = NULL;
++    mpPlayer2Attention = NULL;
++#endif
+ }
+ 
+ /* 800521D4-80052400       .text itemInit__14dComIfG_play_cFv */
+@@ -680,6 +686,12 @@ stage_arrow_class* dComIfGp_getRoomArrow(int i_roomNo) {
+ /* 800537C8-8005388C       .text dComIfGp_setNextStage__FPCcsScScfUliSc */
+ void dComIfGp_setNextStage(const char* i_stageName, s16 i_point, s8 i_roomNo, s8 i_layer,
+                            f32 i_lastSpeed, u32 i_lastMode, BOOL i_setPoint, s8 i_wipe) {
++#if TARGET_PC
++    // Split-screen: the player who does not lead does not take everyone to another stage (or
++    // back to a restart point): Player 2 is brought back to Player 1, Player 1 to Player 2.
++    if (pc_ss_block_scene_change())
++        return;
++#endif
+     g_dComIfG_gameInfo.play.setNextStage(i_stageName, i_roomNo, i_point, i_layer, i_wipe);
+ 
+     if (daPy_getPlayerLinkActorClass() != NULL) {
+diff --git a/game/src/d/d_demo.cpp b/game/src/d/d_demo.cpp
+index b28d195..84367c0 100644
+--- a/game/src/d/d_demo.cpp
++++ b/game/src/d/d_demo.cpp
+@@ -656,6 +656,11 @@ void* dDemo_system_c::JSGFindObject(const char* name, JStage::TEObject type) con
+ 
+     if (type == JStage::TOBJ_ACTOR || type == JStage::TOBJ_ACTOR_UNK) {
+         fopAc_ac_c* ac = fopAcM_searchFromName((char*)name, 0, 0);
++#if TARGET_PC
++        // Split-screen: "Link" in a cutscene is the lead's Link.
++        if (pc_ss_is_non_lead_link(ac))
++            ac = dComIfGp_getLinkPlayer();
++#endif
+         if (ac == NULL) {
+             if (type == JStage::TOBJ_ACTOR && strncmp(name, "d_act", sizeof("d_act")-1) == 0) {
+                 ac = (fopAc_ac_c*)fopAcM_fastCreate((char*)name, 0);
+diff --git a/game/src/d/d_drawlist.cpp b/game/src/d/d_drawlist.cpp
+index a2ebce2..ef80104 100644
+--- a/game/src/d/d_drawlist.cpp
++++ b/game/src/d/d_drawlist.cpp
+@@ -2092,6 +2092,42 @@ void dDlst_list_c::reset() {
+         m3DLineMatSortPacket[i].reset();
+ }
+ 
++#if TARGET_PC
++void dDlst_shadowControl_c::resetForView() {
++    for (s32 i = 0; i < (s32)ARRAY_SIZE(mReal); i++) {
++        mReal[i].resetForView();
++    }
++    mSimpleNum = 0;
++}
++
++// Split-screen: reset() without the 2D lists (the HUD is drawn once over both views) and without
++// the 3D-in-2D list (filled by the message and title processes, which the second view skips).
++void dDlst_list_c::reset3D() {
++    mpOpaListSky->frameInit();
++    mpXluListSky->frameInit();
++    mpOpaListP0->frameInit();
++    mpOpaListP1->frameInit();
++    mpXluListP1->frameInit();
++    mpOpaListBG->frameInit();
++    mpXluListBG->frameInit();
++    mpOpaList->frameInit();
++    mpXluList->frameInit();
++    mpOpaListFilter->frameInit();
++    mpOpaListMaskOff->frameInit();
++    mpXluListMaskOff->frameInit();
++    mpOpaListInvisible->frameInit();
++    mpXluListInvisible->frameInit();
++    setOpaList();
++    setXluList();
++    dComIfGd_resetAlphaModel();
++    dComIfGd_resetSpotModel();
++    dComIfGd_resetLightModel();
++    mShadowControl.resetForView();
++    for (u32 i = 0; i < ARRAY_SIZE(m3DLineMatSortPacket); i++)
++        m3DLineMatSortPacket[i].reset();
++}
++#endif
++
+ /* 80086490-80086540       .text entryZSortXluDrawList__12dDlst_list_cFP13J3DDrawBufferP9J3DPacketR4cXyz */
+ void dDlst_list_c::entryZSortXluDrawList(J3DDrawBuffer* pBuffer, J3DPacket* pPacket, cXyz& pos) {
+     f32 z = -J3DCalcZValue(j3dSys.getViewMtx(), pos);
+diff --git a/game/src/d/d_event.cpp b/game/src/d/d_event.cpp
+index 8adbd4d..26ba77f 100644
+--- a/game/src/d/d_event.cpp
++++ b/game/src/d/d_event.cpp
+@@ -10,6 +10,9 @@
+ #include "f_op/f_op_actor.h" // dEvt_info_c
+ #include "f_op/f_op_actor_mng.h"
+ #include "f_pc/f_pc_manager.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ 
+ /* 8006FE04-8006FE54       .text __ct__14dEvt_control_cFv */
+ dEvt_control_c::dEvt_control_c() {
+@@ -37,6 +40,12 @@ s32 dEvt_control_c::orderOld(u16 eventType, u16 priority, u16 flag, u16 hindFlag
+ s32 dEvt_control_c::order(u16 eventType, u16 priority, u16 flag, u16 hindFlag, void* ac1, void* ac2, s16 eventIdx, u8 eventInfoIdx) {
+     if (mOrderCount >= 8)
+         return FALSE;
++#if TARGET_PC
++    // Split-screen: the player who does not lead takes the lead by talking to someone, opening a
++    // door or a chest, or getting an item; anything else they would start is the lead's to start.
++    if (pc_ss_block_event_order(eventType))
++        return FALSE;
++#endif
+ 
+     dEvt_order_c* pNewOrder = &mOrder[mOrderCount];
+     pNewOrder->mEventType = eventType;
+diff --git a/game/src/d/d_event_manager.cpp b/game/src/d/d_event_manager.cpp
+index e593913..5b626c8 100644
+--- a/game/src/d/d_event_manager.cpp
++++ b/game/src/d/d_event_manager.cpp
+@@ -206,6 +206,11 @@ static void* findObjectCallBack(fopAc_ac_c* actor, void* work) {
+     if (inf == NULL)
+         return NULL;
+ 
++#if TARGET_PC
++    // Split-screen: "Link" in a cutscene is the lead's Link.
++    if (pc_ss_is_non_lead_link(actor))
++        return NULL;
++#endif
+     if (inf->procname == fopAcM_GetProfName(actor) && inf->argument == actor->argument && (prm->mMask == 0 || (prm->mValue == (prm->mMask & fopAcM_GetParam(actor)))))
+         return actor;
+ 
+diff --git a/game/src/d/d_kankyo.cpp b/game/src/d/d_kankyo.cpp
+index 3ee8f70..7d19d41 100644
+--- a/game/src/d/d_kankyo.cpp
++++ b/game/src/d/d_kankyo.cpp
+@@ -7,6 +7,7 @@
+ #include "d/d_kankyo.h"
+ #if TARGET_PC
+ #include "pc/game_hooks.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ #include "d/d_bg_s_gnd_chk.h"
+ #include "d/d_com_inf_game.h"
+@@ -2483,7 +2484,7 @@ void dKy_setLight() {
+     // COS_FPS60_TEST's paint B (game_hooks.h): the lights as paint A left them. The two blocks below
+     // ease the player light towards its influence (cLib_addCalc) and flicker the light colours
+     // (static targets, cM_rndF) once per paint; paint B only loads them.
+-    if (!pc_paint_is_extra()) {
++    if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat()) {
+ #endif
+     // light
+     {
+diff --git a/game/src/d/d_kankyo_rain.cpp b/game/src/d/d_kankyo_rain.cpp
+index eecd443..4df2d9f 100644
+--- a/game/src/d/d_kankyo_rain.cpp
++++ b/game/src/d/d_kankyo_rain.cpp
+@@ -7,6 +7,7 @@
+ #include "d/d_kankyo_rain.h"
+ #if TARGET_PC
+ #include "pc/game_hooks.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ #include "d/d_bg_s_gnd_chk.h"
+ #include "d/d_bg_s_roof_chk.h"
+@@ -3352,7 +3353,7 @@ void dKyr_drawSun(Mtx drawMtx, cXyz* pPos, GXColor& reg0, u8** pImg) {
+     } else {
+ #if TARGET_PC
+         // COS_FPS60_TEST's paint B (game_hooks.h): the counter as paint A left it.
+-        if (!pc_paint_is_extra())
++        if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat())
+ #endif
+         if (pSunPkt->field_0x3c < 5)
+             pSunPkt->field_0x3c += 2;
+@@ -4321,7 +4322,7 @@ void drawPoison(Mtx drawMtx, u8** pImg) {
+     GXLoadPosMtxImm(drawMtx, GX_PNMTX0);
+ #if TARGET_PC
+     // COS_FPS60_TEST's paint B (game_hooks.h): the rotation as paint A left it.
+-    if (!pc_paint_is_extra())
++    if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat())
+ #endif
+     {
+     rot += 1.3f;
+@@ -5115,7 +5116,7 @@ void dKyr_drawStar(Mtx drawMtx, u8** pImg) {
+ 
+ #if TARGET_PC
+     // COS_FPS60_TEST's paint B (game_hooks.h): the rotation as paint A left it.
+-    if (!pc_paint_is_extra())
++    if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat())
+ #endif
+     {
+     rot++;
+@@ -5494,7 +5495,7 @@ void drawCloudShadow(Mtx drawMtx, u8** pImg) {
+     GXLoadPosMtxImm(drawMtx, GX_PNMTX0);
+ #if TARGET_PC
+     // COS_FPS60_TEST's paint B (game_hooks.h): the rotation as paint A left it.
+-    if (!pc_paint_is_extra())
++    if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat())
+ #endif
+     {
+     rot -= 1.5f;
+@@ -5752,7 +5753,7 @@ void drawVrkumo(Mtx drawMtx, GXColor& color, u8** pImg) {
+ 
+ #if TARGET_PC
+                 // COS_FPS60_TEST's paint B (game_hooks.h): the clouds' sway as paint A left it.
+-                if (!var_r28 && !pc_paint_is_extra()) {
++                if (!var_r28 && !pc_paint_is_extra() && !pc_ss_paint_is_repeat()) {
+ #else
+                 if (!var_r28) {
+ #endif
+diff --git a/game/src/d/d_particle.cpp b/game/src/d/d_particle.cpp
+index d7ea28d..84baa00 100644
+--- a/game/src/d/d_particle.cpp
++++ b/game/src/d/d_particle.cpp
+@@ -29,6 +29,7 @@
+ #include "stdio.h"
+ #if TARGET_PC
+ #include "pc/game_hooks.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ 
+ /* 8007A4D8-8007A514       .text __ct__18dPa_modelEmitter_cFv */
+@@ -857,6 +858,12 @@ void dPa_control_c::draw(JPADrawInfo* param_1, u8 param_2) {
+ 
+ /* 8007D1DC-8007D378       .text set__13dPa_control_cFUcUsPC4cXyzPC5csXyzPC4cXyzUcP18dPa_levelEcallBackScPC8_GXColorPC8_GXColorPC4cXyz */
+ JPABaseEmitter* dPa_control_c::set(u8 groupID, u16 userID, const cXyz* pos, const csXyz* angle, const cXyz* scale, u8 alpha, dPa_levelEcallBack* pCallBack, s8 setupInfo, const GXColor* prm, const GXColor* env, const cXyz* globalScale) {
++#if TARGET_PC
++    // Split-screen: the second view's draws start no particles (the first view's did).
++    if (pc_ss_in_extra_view_pass()) {
++        return NULL;
++    }
++#endif
+     JGeometry::TVec3<f32> tmp(pos->x, pos->y, pos->z);
+     JPABaseEmitter* emtr = mEmitterMng->createSimpleEmitterID(tmp, userID, groupID, getRM_ID(userID), NULL, NULL);
+     if (emtr == NULL)
+@@ -893,6 +900,12 @@ JPABaseEmitter* dPa_control_c::set(u8 groupID, u16 userID, const cXyz* pos, cons
+ 
+ /* 8007D378-8007D414       .text setBombSmoke__13dPa_control_cFUsPC4cXyzPC5csXyzPC4cXyzUc */
+ JPABaseEmitter* dPa_control_c::setBombSmoke(u16 userID, const cXyz* pos, const csXyz* angle, const cXyz* scale, u8 alpha) {
++#if TARGET_PC
++    // Split-screen: the second view's draws start no particles (the first view's did).
++    if (pc_ss_in_extra_view_pass()) {
++        return NULL;
++    }
++#endif
+     JPABaseEmitter* emtr = setToonP1(userID, pos, angle, scale, alpha, &mBombSmokeEcallBack, -1, NULL, NULL, NULL);
+     if (emtr != NULL) {
+         if (userID == 0x2009)
+@@ -905,6 +918,12 @@ JPABaseEmitter* dPa_control_c::setBombSmoke(u16 userID, const cXyz* pos, const c
+ 
+ /* 8007D414-8007D998       .text setSimpleLand__13dPa_control_cFiPC4cXyzPC5csXyzfffP12dKy_tevstr_cPii */
+ JPABaseEmitter* dPa_control_c::setSimpleLand(int code, const cXyz* pos, const csXyz* angle, f32 scale1, f32 scale2, f32 scale3, dKy_tevstr_c* i_tevStr, int* i_return_id, int flag) {
++#if TARGET_PC
++    // Split-screen: the second view's draws start no particles (the first view's did).
++    if (pc_ss_in_extra_view_pass()) {
++        return NULL;
++    }
++#endif
+     JUT_ASSERT(VERSION_SELECT(1698, 1702, 1713, 1714), (i_tevStr != NULL) && (i_return_id != NULL));
+     *i_return_id = checkAtrCodeEffect(code);
+     if (*i_return_id == -1)
+@@ -973,6 +992,12 @@ JPABaseEmitter* dPa_control_c::setSimpleLand(int code, const cXyz* pos, const cs
+ 
+ /* 8007D998-8007DA58       .text setSimpleLand__13dPa_control_cFR13cBgS_PolyInfoPC4cXyzPC5csXyzfffP12dKy_tevstr_cPii */
+ JPABaseEmitter* dPa_control_c::setSimpleLand(cBgS_PolyInfo& polyInfo, const cXyz* pos, const csXyz* angle, f32 scale1, f32 scale2, f32 scale3, dKy_tevstr_c* i_tevStr, int* i_return_id, int flag) {
++#if TARGET_PC
++    // Split-screen: the second view's draws start no particles (the first view's did).
++    if (pc_ss_in_extra_view_pass()) {
++        return NULL;
++    }
++#endif
+     if (dComIfG_Bgsp()->ChkPolySafe(polyInfo)) {
+         return setSimpleLand(dComIfG_Bgsp()->GetAttributeCode(polyInfo), pos, angle, scale1, scale2, scale3, i_tevStr, i_return_id, flag);
+     }
+@@ -994,6 +1019,12 @@ s32 dPa_control_c::checkAtrCodeEffect(int code) {
+ 
+ /* 8007DAA8-8007DB34       .text setNormalStripes__13dPa_control_cFUsPC4cXyzPC5csXyzPC4cXyzUcUs */
+ JPABaseEmitter* dPa_control_c::setNormalStripes(u16 ptclID, const cXyz* pos, const csXyz* angle, const cXyz* scale, u8 alpha, u16 user) {
++#if TARGET_PC
++    // Split-screen: the second view's draws start no particles (the first view's did).
++    if (pc_ss_in_extra_view_pass()) {
++        return NULL;
++    }
++#endif
+     JPABaseEmitter* emtr = setNormal(ptclID, pos, angle, scale, alpha, &mStripes, -1, NULL, NULL, NULL);
+     if (emtr != NULL)
+         emtr->setUserWork(user);
+@@ -1016,6 +1047,12 @@ bool dPa_control_c::newSimple(u16 effectID, u8 groupID) {
+ 
+ /* 8007DBC4-8007DC30       .text setSimple__13dPa_control_cFUsPC4cXyzUcRC8_GXColorRC8_GXColori */
+ bool dPa_control_c::setSimple(u16 param_1, const cXyz* param_2, u8 param_3, const GXColor& param_4, const GXColor& param_5, int param_6) {
++#if TARGET_PC
++    // Split-screen: the second view's draws start no particles (the first view's did).
++    if (pc_ss_in_extra_view_pass()) {
++        return false;
++    }
++#endif
+     dPa_simpleEcallBack* simple = getSimple(param_1);
+     if (simple == NULL) {
+         return false;
+diff --git a/game/src/d/d_s_play.cpp b/game/src/d/d_s_play.cpp
+index 59fabc4..79182d9 100644
+--- a/game/src/d/d_s_play.cpp
++++ b/game/src/d/d_s_play.cpp
+@@ -32,6 +32,9 @@
+ #include "f_op/f_op_overlap_mng.h"
+ #include "f_op/f_op_scene_mng.h"
+ #include "f_pc/f_pc_manager.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ #include "m_Do/m_Do_Reset.h"
+ #include "m_Do/m_Do_audio.h"
+ #include "m_Do/m_Do_controller_pad.h"
+@@ -41,6 +44,7 @@
+ #include <stdio.h>
+ #if TARGET_PC
+ #include "pc/pc_harness.h"
++#include "pc/pc_splitscreen_tunic.h"
+ #endif
+ 
+ static const int PRELOAD_RES_MAX = 0x23;
+@@ -392,7 +396,16 @@ static BOOL dScnPly_Draw(dScnPly_ply_c* i_this) {
+         dComIfGp_drawFlower();
+         dComIfG_Ccsp()->Draw();
+         dSnap_DebugDraw();
++#if TARGET_PC
++        // Split-screen: Player 1's lock-on, then Player 2's (the scene runs as the lead).
++        {
++            pc_ss_scoped_ctx ss_ctx(0, g_pc_ss_ctx.camera);
++            dComIfGp_getAttention().Draw();
++        }
++        pc_ss_on_scene_play_draw();
++#else
+         dComIfGp_getAttention().Draw();
++#endif
+         dComIfGp_map_mapBufferSendAGB(3);
+     }
+ 
+@@ -1058,13 +1071,25 @@ static BOOL dScnPly_Execute(dScnPly_ply_c* i_this) {
+         // dComIfGp_jprev_update(); // Debug only
+         dComIfGp_evmng_execute();
+ 
++#if TARGET_PC
++        // Split-screen: this is Player 1's lock-on, whoever leads; Player 2's runs below.
++        {
++            pc_ss_scoped_ctx ss_ctx(0, 0);
++#endif
+         if (dComIfGp_getAttention().Owner() != NULL) {
+             dComIfGp_getAttention().Run(-1);
+         } else {
+             dComIfGp_getAttention().Init(dComIfGp_getPlayer(0), 0);
+         }
++#if TARGET_PC
++        }
++#endif
+ 
+         dComIfGp_getDetect().proc();
++#if TARGET_PC
++        // Split-screen: Player 2 joins, follows and leaves (pc_splitscreen.cpp).
++        pc_ss_on_scene_play_execute();
++#endif
+     }
+ 
+     return TRUE;
+@@ -1081,7 +1106,16 @@ static bool doPreLoad = true;
+ 
+ /* 802350BC-80235364       .text dScnPly_Delete__FP13dScnPly_ply_c */
+ static BOOL dScnPly_Delete(dScnPly_ply_c* i_this) {
++#if TARGET_PC
++    // Split-screen: Player 2's lock-on goes with the scene (Player 1's just below).
++    pc_ss_on_scene_play_delete();
++    {
++        pc_ss_scoped_ctx ss_ctx(0, 0);
++        dComIfGp_getAttention().~dAttention_c();
++    }
++#else
+     dComIfGp_getAttention().~dAttention_c();
++#endif
+     dComIfGp_getVibration().dVibration_c::~dVibration_c();
+     dComIfG_Bgsp()->Dt();
+     dComIfG_Ccsp()->Dt();
+@@ -1094,6 +1128,10 @@ static BOOL dScnPly_Delete(dScnPly_ply_c* i_this) {
+     // dComIfGp_removeJprev(); // Debug only
+     dComIfGp_removeDemo();
+     dMat_control_c::remove();
++#if TARGET_PC
++    // Split-screen: what the scene's Links' tunic colours left.
++    pc_ss_tunic_on_scene_delete();
++#endif
+     
+     fopMsgM_destroyExpHeap(dComIfGp_getExpHeap2D());
+     
+@@ -1357,6 +1395,10 @@ cPhs_State phase_4(dScnPly_ply_c* i_this) {
+     dComIfGd_setWindow(NULL);
+     dComIfGd_setViewport(NULL);
+     dComIfGd_setView(NULL);
++#if TARGET_PC
++    // Split-screen: Player 2's slots of the window, camera and player tables (pc_splitscreen.cpp).
++    pc_ss_on_scene_play_create();
++#endif
+ 
+ #if TARGET_PC
+     // Bug B8 (decision H5): the 2D heap holds the menu window's child heap (tripled in
+diff --git a/game/src/f_op/f_op_actor.cpp b/game/src/f_op/f_op_actor.cpp
+index 14699c5..526e882 100644
+--- a/game/src/f_op/f_op_actor.cpp
++++ b/game/src/f_op/f_op_actor.cpp
+@@ -5,6 +5,9 @@
+ 
+ #include "d/dolzel.h" // IWYU pragma: keep
+ #include "f_op/f_op_actor.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ #include "f_op/f_op_actor_mng.h"
+ #include "f_op/f_op_actor_tag.h"
+ #include "f_op/f_op_draw_tag.h"
+@@ -124,6 +127,11 @@ s32 fopAc_Draw(void* pProc) {
+     BOOL ret = TRUE;
+ 
+     if (!dMenu_flag()) {
++#if TARGET_PC
++        // Split-screen: drawing the second view does not change what the game knows about the
++        // actor, except that an actor only Player 2 sees counts as seen (it keeps moving).
++        const bool ss_extra = pc_ss_in_extra_view_pass();
++#endif
+         s32 moveApproval = dComIfGp_event_moveApproval(actor);
+ 
+         if (
+@@ -144,9 +152,17 @@ s32 fopAc_Draw(void* pProc) {
+ #endif
+             ret = fpcLf_DrawMethod((leafdraw_method_class*)actor->sub_method, actor);
+         } else {
++#if TARGET_PC
++            if (!ss_extra)
++#endif
+             fopAcM_OnCondition(actor, fopAcCnd_NODRAW_e);
+         }
+ 
++#if TARGET_PC
++        if (ss_extra) {
++            return ret;
++        }
++#endif
+         fopAcM_OffStatus(actor, fopAcStts_NODRAW_e);
+ 
+ #if VERSION > VERSION_DEMO
+diff --git a/game/src/f_op/f_op_actor_mng.cpp b/game/src/f_op/f_op_actor_mng.cpp
+index 891249e..d7710c2 100644
+--- a/game/src/f_op/f_op_actor_mng.cpp
++++ b/game/src/f_op/f_op_actor_mng.cpp
+@@ -63,6 +63,17 @@ BOOL fopAcM_SearchByID(fpc_ProcID actorID, fopAc_ac_c** pDstActor) {
+ 
+ /* 80024230-800242AC       .text fopAcM_SearchByName__FsPP10fopAc_ac_c */
+ BOOL fopAcM_SearchByName(s16 procName, fopAc_ac_c** pDstActor) {
++#if TARGET_PC
++    // Split-screen: "the ship" is the one of the player the code runs for (Player 2 has a boat
++    // of their own); the search below finds whichever was created first.
++    if (procName == fpcNm_SHIP_e) {
++        fopAc_ac_c* ship = g_dComIfG_gameInfo.play.getPlayerPtr(2);
++        if (ship != NULL && !fpcM_IsCreating(fopAcM_GetID(ship))) {
++            *pDstActor = ship;
++            return TRUE;
++        }
++    }
++#endif
+     *pDstActor = fopAcM_Search(fpcSch_JudgeForPName, &procName);
+     if (*pDstActor == NULL) {
+         return FALSE;
+diff --git a/game/src/f_op/f_op_camera_mng.cpp b/game/src/f_op/f_op_camera_mng.cpp
+index 1079ac1..7391251 100644
+--- a/game/src/f_op/f_op_camera_mng.cpp
++++ b/game/src/f_op/f_op_camera_mng.cpp
+@@ -6,12 +6,20 @@
+ #include "f_op/f_op_camera_mng.h"
+ #include "f_pc/f_pc_layer.h"
+ #include "f_pc/f_pc_stdcreate_req.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen_ctx.h"
++#endif
+ 
+ static fpc_ProcID l_fopCamM_id[4];
+ 
+ /* 80029468-80029470       .text fopCamM_GetParam__FP12camera_class */
+ u32 fopCamM_GetParam(camera_class* i_this) {
++#if TARGET_PC
++    // Split-screen: a camera's parameter is its camera index, which goes through the context.
++    return pc_ss_remap_camera(fpcM_GetParam(i_this));
++#else
+     return fpcM_GetParam(i_this);
++#endif
+ }
+ 
+ /* 80029470-800294D4       .text fopCamM_Create__FisPv */
+diff --git a/game/src/f_pc/f_pc_base.cpp b/game/src/f_pc/f_pc_base.cpp
+index eb4fb7d..ca15277 100644
+--- a/game/src/f_pc/f_pc_base.cpp
++++ b/game/src/f_pc/f_pc_base.cpp
+@@ -12,6 +12,9 @@
+ #include "f_pc/f_pc_pause.h"
+ #include "f_pc/f_pc_profile.h"
+ #include "dolphin/types.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ 
+ /* 8003C88C-8003C89C       .text fpcBs_Is_JustOfType__Fii */
+ BOOL fpcBs_Is_JustOfType(int i_typeA, int i_typeB) {
+@@ -36,6 +39,10 @@ int fpcBs_MakeOfType(int* i_type) {
+ /* 8003C8DC-8003C904       .text fpcBs_MakeOfId__Fv */
+ fpc_ProcID fpcBs_MakeOfId() {
+     static fpc_ProcID process_id = 1;
++#if TARGET_PC
++    // Split-screen: a process created by one of a player's processes belongs to that player.
++    pc_ss_on_proc_id_made(process_id);
++#endif
+     return process_id++;
+ }
+ 
+@@ -75,6 +82,9 @@ BOOL fpcBs_Delete(base_process_class* i_proc) {
+     if (result == TRUE) {
+         result = fpcMtd_Delete(i_proc->mpPcMtd, i_proc);
+         if (result == TRUE) {
++#if TARGET_PC
++            pc_ss_on_proc_deleted(i_proc->mBsPcId);
++#endif
+             fpcBs_DeleteAppend(i_proc);
+             i_proc->mBsType = 0;
+             cMl::free(i_proc);
+diff --git a/game/src/f_pc/f_pc_draw.cpp b/game/src/f_pc/f_pc_draw.cpp
+index 6a75a26..63a388d 100644
+--- a/game/src/f_pc/f_pc_draw.cpp
++++ b/game/src/f_pc/f_pc_draw.cpp
+@@ -8,6 +8,9 @@
+ #include "f_pc/f_pc_leaf.h"
+ #include "f_pc/f_pc_node.h"
+ #include "f_pc/f_pc_pause.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ 
+ /* 8004042C-800404CC       .text fpcDw_Execute__FP18base_process_class */
+ BOOL fpcDw_Execute(base_process_class* i_proc) {
+@@ -21,9 +24,23 @@ BOOL fpcDw_Execute(base_process_class* i_proc) {
+         } else {
+             draw_func = ((nodedraw_method_class*)i_proc->mpPcMtd)->mpDrawFunc;
+         }
++#if TARGET_PC
++        // Split-screen: the player who waits through the lead's cutscene is not drawn; a draw
++        // runs in its player's context, with the camera of the half being drawn.
++        if (pc_ss_is_suspended_proc(i_proc)) {
++            return FALSE;
++        }
++        const bool ss_was_in_draw = pc_ss_set_in_draw(true);
++        {
++            pc_ss_process_scope ss_scope(i_proc);
++#endif
+         fpcLy_SetCurrentLayer(i_proc->mLyTg.mpLayer);
+         ret = draw_func(i_proc);
+         fpcLy_SetCurrentLayer(curLay);
++#if TARGET_PC
++        }
++        pc_ss_set_in_draw(ss_was_in_draw);
++#endif
+         return ret;
+     } else {
+         return FALSE;
+diff --git a/game/src/f_pc/f_pc_method.cpp b/game/src/f_pc/f_pc_method.cpp
+index 57070e1..e32c415 100644
+--- a/game/src/f_pc/f_pc_method.cpp
++++ b/game/src/f_pc/f_pc_method.cpp
+@@ -15,6 +15,14 @@
+ #define PC_MTD_BOOL(x) (x)
+ #endif
+ 
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++// Split-screen: a process's methods run in its player's context (pc/pc_splitscreen.h).
++#define FPCMTD_SCOPE(i_data) pc_ss_process_scope ss_scope((base_process_class*)(i_data))
++#else
++#define FPCMTD_SCOPE(i_data)
++#endif
++
+ /* 8003EF00-8003EF38       .text fpcMtd_Method__FPFPv_iPv */
+ int fpcMtd_Method(process_method_func i_methodFunc, void* i_data) {
+     if (i_methodFunc != NULL)
+@@ -25,20 +33,30 @@ int fpcMtd_Method(process_method_func i_methodFunc, void* i_data) {
+ 
+ /* 8003EF38-8003EF5C       .text fpcMtd_Execute__FP20process_method_classPv */
+ BOOL fpcMtd_Execute(process_method_class* i_methods, void* i_data) {
++#if TARGET_PC
++    // Split-screen: the player who does not lead waits while the lead is in a cutscene.
++    if (pc_ss_is_suspended_proc((base_process_class*)i_data)) {
++        return TRUE;
++    }
++#endif
++    FPCMTD_SCOPE(i_data);
+     return PC_MTD_BOOL(fpcMtd_Method(i_methods->mpExecuteFunc, i_data));
+ }
+ 
+ /* 8003EF5C-8003EF80       .text fpcMtd_IsDelete__FP20process_method_classPv */
+ BOOL fpcMtd_IsDelete(process_method_class* i_methods, void* i_data) {
++    FPCMTD_SCOPE(i_data);
+     return PC_MTD_BOOL(fpcMtd_Method(i_methods->mpIsDeleteFunc, i_data));
+ }
+ 
+ /* 8003EF80-8003EFA4       .text fpcMtd_Delete__FP20process_method_classPv */
+ BOOL fpcMtd_Delete(process_method_class* i_methods, void* i_data) {
++    FPCMTD_SCOPE(i_data);
+     return PC_MTD_BOOL(fpcMtd_Method(i_methods->mpDeleteFunc, i_data));
+ }
+ 
+ /* 8003EFA4-8003EFC8       .text fpcMtd_Create__FP20process_method_classPv */
+ cPhs_State fpcMtd_Create(process_method_class* i_methods, void* i_data) {
++    FPCMTD_SCOPE(i_data);
+     return fpcMtd_Method(i_methods->mpCreateFunc, i_data);
+ }
+diff --git a/game/src/m_Do/m_Do_controller_pad.cpp b/game/src/m_Do/m_Do_controller_pad.cpp
+index f6eff38..232ad74 100644
+--- a/game/src/m_Do/m_Do_controller_pad.cpp
++++ b/game/src/m_Do/m_Do_controller_pad.cpp
+@@ -14,6 +14,7 @@
+ #include "m_Do/m_Do_main.h"
+ #if TARGET_PC
+ #include "pc/pc_harness.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ 
+ JUTGamePad* g_mDoCPd_gamePad[4];
+@@ -141,6 +142,9 @@ int mDoCPd_Read() {
+ #if TARGET_PC
+     // Step 6.3: COS_SMOKE=pad-echo checks what the game converted against the script.
+     pc_pad_read_done();
++    // Split-screen: Start pressed by the player who does not lead makes them the lead before
++    // anything reads the lead's Start this frame (the pause menu is the lead's).
++    pc_ss_on_pads_read();
+ #endif
+     mDoGaC_Connect();
+     return 1;
+@@ -152,7 +156,12 @@ int mDoCPd_Create() {
+ 
+     JUTGamePad* pad = new JUTGamePad(JUTGamePad::EPort1);
+     g_mDoCPd_gamePad[0] = pad;
++#if TARGET_PC
++    // Split-screen: Player 2 plays on the second port (the GBA port on the GameCube).
++    g_mDoCPd_gamePad[1] = new JUTGamePad(JUTGamePad::EPort2);
++#else
+     g_mDoCPd_gamePad[1] = NULL;
++#endif
+ 
+ #if VERSION == VERSION_DEMO
+     g_mDoCPd_gamePad[2] = new JUTGamePad(JUTGamePad::EPort3);
+diff --git a/game/src/m_Do/m_Do_ext.cpp b/game/src/m_Do/m_Do_ext.cpp
+index 977859a..1366855 100644
+--- a/game/src/m_Do/m_Do_ext.cpp
++++ b/game/src/m_Do/m_Do_ext.cpp
+@@ -7,6 +7,7 @@
+ #include "m_Do/m_Do_ext.h"
+ #if TARGET_PC
+ #include "pc/game_hooks.h"
++#include "pc/pc_splitscreen.h"
+ #endif
+ #include "JSystem/J3DGraphBase/J3DTransform.h"
+ #include "JSystem/JKernel/JKRArchive.h"
+@@ -118,6 +119,12 @@ int mDoExt_baseAnm::initPlay(s16 i_frameMax, int i_attribute, f32 i_rate, s16 i_
+ /* 8000DF24-8000DFC4       .text play__14mDoExt_baseAnmFv */
+ BOOL mDoExt_baseAnm::play() {
+     JUT_ASSERT(VERSION_SELECT(453, 453, 462, 462), mFrameCtrl != NULL);
++#if TARGET_PC
++    // Split-screen: drawing the second view does not advance animations.
++    if (pc_ss_in_extra_view_pass()) {
++        return isStop();
++    }
++#endif
+     mFrameCtrl->update();
+     return isStop();
+ }
+diff --git a/game/src/m_Do/m_Do_graphic.cpp b/game/src/m_Do/m_Do_graphic.cpp
+index 7bcada0..2d0c0a9 100644
+--- a/game/src/m_Do/m_Do_graphic.cpp
++++ b/game/src/m_Do/m_Do_graphic.cpp
+@@ -42,6 +42,9 @@
+ #include "JSystem/JUtility/JUTVideo.h"
+ #include "JSystem/JUtility/JUTXfb.h"
+ #include "dolphin/base/PPCArch.h"
++#if TARGET_PC
++#include "pc/pc_splitscreen.h"
++#endif
+ 
+ JUTFader * mDoGph_gInf_c::mFader;
+ ResTIMG * mDoGph_gInf_c::mFrameBufferTimg;
+@@ -191,7 +194,7 @@ void mDoGph_gInf_c::calcFade() {
+     if (mFade) {
+ #if TARGET_PC
+         // COS_FPS60_TEST's paint B (game_hooks.h): the fade drawn at paint A's rate, not advanced.
+-        if (!pc_paint_is_extra())
++        if (!pc_paint_is_extra() && !pc_ss_paint_is_repeat())
+ #endif
+         {
+         mFadeRate += mFadeSpeed;
+@@ -272,7 +275,7 @@ void mDoGph_gInf_c::offMonotone() {
+ void mDoGph_gInf_c::calcMonotone() {
+ #if TARGET_PC
+     // COS_FPS60_TEST's paint B (game_hooks.h): the monotone rate as paint A left it.
+-    if (pc_paint_is_extra())
++    if (pc_paint_is_extra() || pc_ss_paint_is_repeat())
+         return;
+ #endif
+     if (cLib_chaseS(&mMonotoneRate, mMonotoneRateSpeed < 0 ? 400 : -600, abs(mMonotoneRateSpeed)) != 0 && mMonotoneRateSpeed > 0)
+@@ -1601,6 +1604,96 @@ void setLight() {
+ }
+ 
+ /* 8000AF2C-8000BC38       .text mDoGph_Painter__Fv */
++#if TARGET_PC
++// Split-screen: where each view's copy goes. Only the address is used, as the key of the copy;
++// the pixels stay on the GPU.
++static u8 s_ss_window_tex[2];
++
++// Copies the whole frame out and clears colour and depth for the next view.
++static void splitscreen_capture(int window_no) {
++    const u16 width = mDoMch_render_c::getFbWidth();
++    const u16 height = mDoMch_render_c::getEfbHeight();
++    GXSetViewport(0.0f, 0.0f, width, height, 0.0f, 1.0f);
++    GXSetScissor(0, 0, width, height);
++    GXSetColorUpdate(GX_ENABLE);
++    GXSetAlphaUpdate(GX_ENABLE);
++    GXSetZMode(GX_ENABLE, GX_ALWAYS, GX_ENABLE);
++    GXSetTexCopySrc(0, 0, width, height);
++    GXSetTexCopyDst(width, height, GX_TF_RGBA8, GX_FALSE);
++    GXCopyTex(&s_ss_window_tex[window_no], GX_TRUE);
++    GXPixModeSync();
++    GXInvalidateTexAll();
++    GXSetAlphaUpdate(GX_DISABLE);
++}
++
++// Puts each view's copy in its half of the screen, with a thin line between them.
++static void splitscreen_compose(int window_count) {
++    const u16 width = mDoMch_render_c::getFbWidth();
++    const u16 height = mDoMch_render_c::getEfbHeight();
++
++    GXSetNumChans(0);
++    GXSetNumIndStages(0);
++    GXSetNumTexGens(1);
++    GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
++    GXSetNumTevStages(1);
++    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
++    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
++    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_ENABLE, GX_TEVPREV);
++    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO);
++    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_ENABLE, GX_TEVPREV);
++    GXSetZCompLoc(GX_ENABLE);
++    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
++    GXSetBlendMode(GX_BM_NONE, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_CLEAR);
++    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
++    GXColor black = {0, 0, 0, 0};
++    GXSetFog(GX_FOG_NONE, 0.0f, 0.0f, 0.0f, 0.0f, black);
++    GXSetCullMode(GX_CULL_NONE);
++    GXSetDither(GX_ENABLE);
++    GXSetColorUpdate(GX_ENABLE);
++
++    Mtx44 ortho;
++    C_MTXOrtho(ortho, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 10.0f);
++    GXSetProjection(ortho, GX_ORTHOGRAPHIC);
++    Mtx ident;
++    MTXIdentity(ident);
++    GXLoadPosMtxImm(ident, GX_PNMTX0);
++    GXSetCurrentMtx(GX_PNMTX0);
++    GXClearVtxDesc();
++    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
++    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
++    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
++    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
++
++    const f32 gap = 2.0f;
++    for (int i = 0; i < window_count; i++) {
++        GXTexObj tex;
++        GXInitTexObj(&tex, &s_ss_window_tex[i], width, height, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
++        GXInitTexObjLOD(&tex, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
++        GXLoadTexObj(&tex, GX_TEXMAP0);
++
++        // Side by side: each view was drawn full size with half the aspect ratio.
++        const f32 w = width * 0.5f - gap * 0.5f;
++        const f32 x = i * (width * 0.5f + gap * 0.5f);
++        GXSetViewport(x, 0.0f, w, height, 0.0f, 1.0f);
++        GXSetScissor((u32)x, 0, (u32)w, height);
++        GXBegin(GX_QUADS, GX_VTXFMT0, 4);
++        GXPosition3f32(0.0f, 0.0f, -5.0f);
++        GXTexCoord2f32(0.0f, 0.0f);
++        GXPosition3f32(1.0f, 0.0f, -5.0f);
++        GXTexCoord2f32(1.0f, 0.0f);
++        GXPosition3f32(1.0f, 1.0f, -5.0f);
++        GXTexCoord2f32(1.0f, 1.0f);
++        GXPosition3f32(0.0f, 1.0f, -5.0f);
++        GXTexCoord2f32(0.0f, 1.0f);
++        GXEnd();
++    }
++
++    GXSetViewport(0.0f, 0.0f, width, height, 0.0f, 1.0f);
++    GXSetScissor(0, 0, width, height);
++    GXInvalidateTexAll();
++}
++#endif
++
+ bool mDoGph_Painter() {
+ #if VERSION > VERSION_DEMO
+     JFWDisplay::getManager()->setFader(mDoGph_gInf_c::mFader);
+@@ -1633,16 +1726,40 @@ bool mDoGph_Painter() {
+ 
+     dComIfGp_setCurrentGrafPort(&graf);
+ #if TARGET_PC
++    // Split-screen: window 0 is Player 1's view, window 1 Player 2's. Each is drawn full size
++    // through its own camera and copied out; the copies are put side by side afterwards. The draw
++    // lists hold the scene as Player 1's camera sees it; for window 1 it is entered into them
++    // again, through Player 2's camera.
++    const int ss_windows = pc_ss_window_count();
++    for (int ss_window = 0; ss_window < ss_windows; ss_window++) {
++    if (ss_windows > 1) {
++        if (ss_window > 0) {
++            // Window 0's draws may still read the vertex arrays the scene's draws rewrite.
++            GXDrawDone();
++        }
++        pc_ss_begin_pass(ss_window);
++        if (ss_window > 0) {
++            pc_ss_redraw_scene_for_window();
++        }
++    }
+     // COS_DYNRES (pc_dynres.h): the 3D part, from here to the end of the camera block, at the
+     // dynamic resolution level's scale; the 2D after it at the full scale.
+     if (dComIfGp_getWindowNum() != 0 && dComIfGp_getCamera(dComIfGp_getWindow(0)->getCameraID()) != NULL) {
+         pc_dynres_3d_begin();
+     }
++    if (ss_window == 0)
+ #endif
+     dComIfGd_drawCopy2D();
+     if (dComIfGp_getWindowNum() != 0) {
++#if TARGET_PC
++        // Split-screen: each window's own camera; when the screen is not split, the lead's.
++        dDlst_window_c* window = dComIfGp_getWindow(ss_window);
++        const int ss_physical_camera = ss_windows > 1 ? window->getCameraID() : pc_ss_lead();
++        s32 cameraID = pc_ss_remap_camera(ss_physical_camera);
++#else
+         dDlst_window_c* window = dComIfGp_getWindow(0);
+         s32 cameraID = window->getCameraID();
++#endif
+         camera_process_class* camera = (camera_process_class*)dComIfGp_getCamera(cameraID);
+ 
+         if (camera != NULL) {
+@@ -1849,7 +1966,7 @@ bool mDoGph_Painter() {
+ #if TARGET_PC
+                 // COS_FPS60_TEST's paint B (game_hooks.h): the picto box capture's steps run in paint
+                 // A only (the next paint A shows the same lists); paint B only draws the photo.
+-                if (mCaptureStep == 1 && !pc_paint_is_extra()) {
++                if (mCaptureStep == 1 && !pc_paint_is_extra() && !pc_ss_paint_is_repeat()) {
+ #else
+                 if (mCaptureStep == 1) {
+ #endif
+@@ -1866,6 +1983,19 @@ bool mDoGph_Painter() {
+ #if TARGET_PC
+     pc_fps60_view_end(); // COS_FPS60_TEST step B: the view delta off before the 2D
+     pc_dynres_3d_end(); // COS_DYNRES: the 3D stretched over the EFB, full scale again
++    if (ss_windows > 1) {
++        splitscreen_capture(ss_window);
++        pc_ss_end_pass();
++    }
++    }  // ss_window
++    if (ss_windows > 1) {
++        splitscreen_compose(ss_windows);
++        // Player 1's view again for the 2D below and the next frame's game logic, and nothing of
++        // the second view's draws still pending when the draw pass refills the arrays.
++        pc_ss_restore_view();
++        graf.setPort();
++        GXDrawDone();
++    }
+ #endif
+ 
+ #if TARGET_PC
+diff --git a/native/README.md b/native/README.md
+index 332352a..5c136fe 100644
+--- a/native/README.md
++++ b/native/README.md
+@@ -512,6 +512,13 @@ open the PLAY scene is paused (hit-stop pause timer) and the game gets no pad in
+ - Gráficos > "Resolución dinámica" (`COS_DYNRES`, per operation mode): "Con 60 fps" / "With 60 fps"
+   (`auto`, the default: only while the 60 fps row is on), "Desactivada" / "Off" (`0`: never, even
+   with 60 fps) or "Siempre" / "Always" (`1`). Levels down to 2/3 of the internal resolution.
++- Gráficos > "Túnica del jugador 1" / "Player 1's tunic" (`COS_SS_P1_TUNIC`, default `default`: the
++  game's colours) and "Túnica del jugador 2" / "Player 2's tunic" (`COS_SS_P2_TUNIC`, default `red`):
++  split-screen's tunic colour of each player's Link, also on the clothes he starts in: `default`,
++  `red`, `blue`, `purple`, `gold`, `orange`, `pink`, `black`, `white`, `green` (the hero's clothes as
++  the game has them, a green starting shirt). Live. Only the tunic
++  and cap (or the starting shirt) change, with their shading; skin, hair, belt and boots stay
++  (`native/src/pc/game_hooks/pc_splitscreen_tunic.cpp`). Without split-screen the one Link is player 1.
+ - Depuración: travel to a stage (main places by name, and every stage of the disc with the start
+   `boot_sweep.py --list` picks; PLAY scene only), "Navegar (barco, vela y batuta)" (the sailing
+   preset of `COS_BOOT_PRESET=sailing` on the file being played, in memory only, then to Windfall's
+diff --git a/native/include/pc/pc_splitscreen.h b/native/include/pc/pc_splitscreen.h
+new file mode 100644
+index 0000000..c336e84
+--- /dev/null
++++ b/native/include/pc/pc_splitscreen.h
+@@ -0,0 +1,128 @@
++#pragma once
++
++// Split-screen co-op: two players, each with their own Link, camera, controller and half of
++// the screen. Player 1 is the Link the stage creates; Player 2's Link and camera are created
++// next to them. Implementation: native/src/pc/game_hooks/pc_splitscreen.cpp. Notes:
++// docs/SPLITSCREEN.md.
++//
++// The player context (pc_splitscreen_ctx.h) decides whose slot index 0 of the player, camera
++// and pad tables means while code runs:
++// - each player's own processes (their Link, camera, boat, and whatever those create) run as
++//   that player, through pc_ss_process_scope around every process method;
++// - everything else (the world: NPCs, enemies, events, rooms, menus) runs as the lead. The lead
++//   is whoever last talked to someone, opened a door or a chest, got an item or paused
++//   (Player 1 when a scene starts).
++
++#include "pc/pc_splitscreen_ctx.h"
++
++#include <stdint.h>
++
++struct base_process_class;
++class camera_class;
++class fopAc_ac_c;
++class dAttention_c;
++typedef uint32_t fpc_ProcID;
++
++// Registers the "Split-screen co-op" setting (pc_main.cpp, with the other modules).
++void pc_ss_init();
++// The setting is on.
++bool pc_ss_enabled();
++// Player 2 is in the scene and the screen is split now.
++bool pc_ss_active();
++// 2 while the screen is split, else 1.
++int pc_ss_window_count();
++// Each view's aspect ratio against the full screen's (0.5 side by side), 1 when not split.
++float pc_ss_aspect_scale();
++
++// Player 2's Link (NULL when there is none).
++fopAc_ac_c* pc_ss_player2();
++bool pc_ss_is_player2(const fopAc_ac_c* actor);
++// Either player's Link, while there are two.
++bool pc_ss_is_player_link(const fopAc_ac_c* actor);
++// The Link of the player who does not lead (cutscenes cast the lead's).
++bool pc_ss_is_non_lead_link(const fopAc_ac_c* actor);
++// Either player's boat, while there are two.
++bool pc_ss_is_player_ship(const fopAc_ac_c* actor);
++// Not a lock-on target of that player: either Link, or the other player's boat.
++bool pc_ss_hidden_from(const fopAc_ac_c* actor, const fopAc_ac_c* owner);
++// The player (0 or 1) whose Link this is; 0 for anything else.
++int pc_ss_link_player(const fopAc_ac_c* link);
++// A second Link was created in this scene: both use the model data Link's archive holds, so
++// each binds its own animation state to it before it is calculated or drawn.
++bool pc_ss_links_share_model_data();
++
++// Process bookkeeping (f_pc_base.cpp).
++void pc_ss_on_proc_id_made(fpc_ProcID id);
++void pc_ss_on_proc_deleted(fpc_ProcID id);
++// A process of the player who is waiting while the lead is in a cutscene or a menu.
++bool pc_ss_is_suspended_proc(const base_process_class* proc);
++// The player (0 or 1) a process belongs to, or -1 for the world.
++int pc_ss_owner_of(const base_process_class* proc);
++// The owner of the process running now (-1: the world).
++int pc_ss_current_owner();
++
++// Context for a process's methods (f_pc_method.cpp, f_pc_draw.cpp).
++class pc_ss_process_scope {
++public:
++    explicit pc_ss_process_scope(const base_process_class* proc);
++    ~pc_ss_process_scope();
++    pc_ss_process_scope(const pc_ss_process_scope&) = delete;
++    pc_ss_process_scope& operator=(const pc_ss_process_scope&) = delete;
++
++private:
++    pc_ss_ctx_t mSaved;
++    int mSavedOwner;
++    bool mChanged;
++};
++
++// Context for code that acts for one player outside their processes.
++class pc_ss_scoped_ctx {
++public:
++    pc_ss_scoped_ctx(uint8_t player, uint8_t camera);
++    ~pc_ss_scoped_ctx();
++    pc_ss_scoped_ctx(const pc_ss_scoped_ctx&) = delete;
++    pc_ss_scoped_ctx& operator=(const pc_ss_scoped_ctx&) = delete;
++
++private:
++    pc_ss_ctx_t mSaved;
++    int mSavedOwner;
++};
++
++// Draws: fpcDw_Execute marks that a draw method runs (cameras then use their own index, the
++// rest the camera of the half being drawn).
++bool pc_ss_set_in_draw(bool in_draw);
++
++// The pads were read (mDoCPd_Read).
++void pc_ss_on_pads_read();
++
++// The play scene (d_s_play.cpp).
++void pc_ss_on_scene_play_create();
++void pc_ss_on_scene_play_execute();
++void pc_ss_on_scene_play_draw();
++void pc_ss_on_scene_play_delete();
++
++// The painter (m_Do_graphic.cpp): one pass per half of the screen.
++void pc_ss_begin_pass(int window);
++void pc_ss_end_pass();
++// Enters the 3D scene into the draw lists again, through the camera of window 1.
++void pc_ss_redraw_scene_for_window();
++// Puts Player 1's view back (j3dSys, the draw list's view, the clipper) after the painter.
++void pc_ss_restore_view();
++bool pc_ss_in_extra_view_pass();
++// The second view is being drawn, or the paint is frame interpolation's extra one: paint-time
++// animation (fades, the sea, the sky) must not advance.
++bool pc_ss_paint_is_repeat();
++
++// Cameras (d_camera.cpp).
++// The camera whose view is being drawn or set up now (the other one keeps its view to itself).
++bool pc_ss_is_pass_camera(const camera_class* camera);
++// The lead's camera: the sound listener, motion blur, focus.
++bool pc_ss_is_audio_camera(const camera_class* camera);
++
++// What the player who does not lead may not do (stage, room, restart changes; events).
++bool pc_ss_block_scene_change();
++bool pc_ss_block_global_change();
++bool pc_ss_block_event_order(uint16_t type);
++// Damage taken by Player 2 is not taken off the shared hearts.
++bool pc_ss_drops_damage();
++int pc_ss_lead();
+diff --git a/native/include/pc/pc_splitscreen_ctx.h b/native/include/pc/pc_splitscreen_ctx.h
+new file mode 100644
+index 0000000..b8cd344
+--- /dev/null
++++ b/native/include/pc/pc_splitscreen_ctx.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++// Split-screen co-op: the "player context".
++//
++// The game was written for one player. Rather than touching the thousands of places that ask
++// for "the player" (dComIfGp_getPlayer(0), dComIfGp_getLinkPlayer()), "the camera"
++// (dComIfGp_getCamera(0)) or "the pad" (CPad_*(0)), the per-player tables have a second slot
++// on PC (d_com_inf_game.h) and these two values decide which slot index 0 means right now:
++//
++//   player  1 while Player 2's own processes (their Link, camera, boat, and what those
++//           create) run. Index 0 of the player tables and pad 0 then mean Player 2.
++//   camera  1 while Player 2's camera runs, or while Player 2's half of the screen is drawn.
++//           Index 0 of the camera tables then means Player 2's camera.
++//
++// Indices 0 and 1 swap; anything else passes through. Stored values that are themselves
++// indices (a camera's player, a player's camera) are kept physical and go through the same
++// swap when read or written.
++//
++// Included by d_com_inf_game.h and m_Do_controller_pad.h, so it has no dependencies.
++
++#include <stdint.h>
++
++struct pc_ss_ctx_t {
++    uint8_t player;
++    uint8_t camera;
++};
++
++extern pc_ss_ctx_t g_pc_ss_ctx;
++
++inline int pc_ss_remap_player(int i) {
++    return (i == 0 || i == 1) ? (i ^ g_pc_ss_ctx.player) : i;
++}
++
++inline int pc_ss_remap_camera(int i) {
++    return (i == 0 || i == 1) ? (i ^ g_pc_ss_ctx.camera) : i;
++}
++
++inline uint32_t pc_ss_remap_pad(uint32_t pad) {
++    return pad <= 1 ? (pad ^ g_pc_ss_ctx.player) : pad;
++}
++
++inline bool pc_ss_in_p2() {
++    return g_pc_ss_ctx.player != 0;
++}
+diff --git a/native/include/pc/pc_splitscreen_tunic.h b/native/include/pc/pc_splitscreen_tunic.h
+new file mode 100644
+index 0000000..6e0f2d1
+--- /dev/null
++++ b/native/include/pc/pc_splitscreen_tunic.h
+@@ -0,0 +1,51 @@
++/*
++ * pc_splitscreen_tunic.h - Split-screen: a tunic colour for each player
++ * (native/src/pc/game_hooks/pc_splitscreen_tunic.cpp).
++ *
++ * Settings (options menu, Gráficos; saved in settings.ini like the other rows):
++ *   COS_SS_P1_TUNIC  player 1's colour, default "default" (the game's own colours)
++ *   COS_SS_P2_TUNIC  player 2's colour, default "red"
++ * Values: default, red, blue, purple, gold, orange, pink, black, white, green ("green" leaves the
++ * hero's clothes as the game has them and turns the casual shirt green).
++ *
++ * Link's clothes are one texture of his body model (cl.bdl): the hero's clothes are the S3TC atlas
++ * "linktexS3TC" (GX CMPR; tunic and cap, skin, hair, belt and boots in one image), the clothes he
++ * starts in are linktexbci4 (CI4 with a 16-colour palette), which daPy_lk_c copies over that same
++ * texture table entry (mpCurrLinktex). Only the tunic's greens (hero) or the shirt's blues (casual) are
++ * moved to the chosen colour, keeping their shading; the rest of the atlas stays as it is.
++ *
++ * The model data is shared by every Link, and on PC a material packet takes its textures from the
++ * table that was j3dSys's when its display list was recorded (J3DMatPacket::recordTexture, at every
++ * diff for Link, whose diff flag has texture numbers). So each Link with a colour gets its own copy
++ * of the table (the headers copied, the clothes entry pointing at a recoloured image or palette), and
++ * the model data's table is that copy for the length of the Link's draw: everything the draw records
++ * (calcMaterial, diff, entry, the face's entryIn, the frozen material's backup) takes the copy, and
++ * the packets keep it until the draw lists are drawn. When the outfit changes (the shared entry is
++ * swapped in place), the copy is made again from the new one.
++ */
++#ifndef PC_SPLITSCREEN_TUNIC_H
++#define PC_SPLITSCREEN_TUNIC_H
++
++class daPy_lk_c;
++
++// Split-screen: points this Link's body model at a copy of its texture table with player `player`'s
++// (0 or 1) tunic colour, until pc_ss_tunic_restore. Called at the start of daPy_lk_c::draw. With the
++// colour "default" and no copy made yet it only reads a cached setting.
++void pc_ss_tunic_apply(daPy_lk_c* link, int player);
++// Split-screen: gives the shared model data its own texture table back (end of daPy_lk_c::draw).
++void pc_ss_tunic_restore(daPy_lk_c* link);
++// Split-screen: frees this Link's copy (daPy_lk_c::playerDelete), a few frames later.
++void pc_ss_tunic_on_link_delete(daPy_lk_c* link);
++// Split-screen: frees what the scene's Links left (the PLAY scene's delete).
++void pc_ss_tunic_on_scene_delete();
++
++// Split-screen: pc_ss_tunic_apply for the length of a scope, restored on every return of the draw.
++struct PcSsTunicDrawScope {
++    daPy_lk_c* link;
++    PcSsTunicDrawScope(daPy_lk_c* l, int player) : link(l) { pc_ss_tunic_apply(l, player); }
++    ~PcSsTunicDrawScope() { pc_ss_tunic_restore(link); }
++    PcSsTunicDrawScope(const PcSsTunicDrawScope&) = delete;
++    PcSsTunicDrawScope& operator=(const PcSsTunicDrawScope&) = delete;
++};
++
++#endif
+diff --git a/native/src/pc/README.md b/native/src/pc/README.md
+index b998a8d..8e61bf8 100644
+--- a/native/src/pc/README.md
++++ b/native/src/pc/README.md
+@@ -37,6 +37,7 @@ units out).
+ | `pc_c_bg_s` | the DZB tables' relocation in `cBgS::ConvDzb` (`c_bg_s.cpp`) |
+ | `pc_audio_hooks` | JaiInit.aaf's bank and wave-system tables (`JAIInitData.cpp`) |
+ | `pc_meter_hooks` | the widescreen HUD helpers (`d_meter.cpp`) |
++| `pc_splitscreen_tunic` | split-screen: each player's tunic colour, a per-Link copy of the body model's texture table with the clothes recoloured (`d_a_player_main.cpp`'s draw and delete, `d_s_play.cpp`'s delete; API `native/include/pc/pc_splitscreen_tunic.h`) |
+ 
+ Headers in `native/include/pc/game_hooks/`: `f_pc_profile_lst.h`/`.inc` (the typed profile list),
+ `j3d_transform.h` (inline `J3DPSMulMtxVec`), `j3d_shape.h` (the vertex array bases), `j3d.h` (the
+diff --git a/native/src/pc/features/pc_menu.cpp b/native/src/pc/features/pc_menu.cpp
+index fb9c5f0..d2b45ad 100644
+--- a/native/src/pc/features/pc_menu.cpp
++++ b/native/src/pc/features/pc_menu.cpp
+@@ -490,6 +490,13 @@ const PcSettingChoice kHitch[] = {{"0", "Desactivadas", "Off"}, {"33", "Más de
+ const PcSettingChoice kHdStats[] = {{"0", "Desactivadas", "Off"}, {"150", "Cada 150 cuadros", "Every 150 frames"},
+                                     {"300", "Cada 300 cuadros", "Every 300 frames"},
+                                     {"600", "Cada 600 cuadros", "Every 600 frames"}};
++// Split-screen: the tunic colours (native/src/pc/game_hooks/pc_splitscreen_tunic.cpp has the RGB of each).
++const PcSettingChoice kSsTunic[] = {
++    {"default", "Los del juego", "The game's own"}, {"red", "Rojo", "Red"},
++    {"blue", "Azul", "Blue"},                       {"purple", "Morado", "Purple"},
++    {"gold", "Dorado", "Gold"},                     {"orange", "Naranja", "Orange"},
++    {"pink", "Rosa", "Pink"},                       {"black", "Negro", "Black"},
++    {"white", "Blanco", "White"},                   {"green", "Verde", "Green"}};
+ 
+ const PcSettingDesc kBuiltins[] = {
+     // Gráficos
+@@ -534,6 +541,19 @@ const PcSettingDesc kBuiltins[] = {
+      "Heat haze",
+      "The picture wobbles over lava and fire (Dragon Roost and its cavern), as on the GameCube. "
+      "At 60 fps it looks wrong: it distorts too much."},
++    // Split-screen: one tunic colour per player (orders 96-97; 94-95 left for the split-screen rows).
++    {"COS_SS_P1_TUNIC", "Túnica del jugador 1",
++     "Pantalla dividida: color de la túnica del Link del jugador 1, también la ropa con la que empieza. "
++     "Los del juego: verde (camisa azul al empezar).",
++     PC_SETTING_TAB_GRAPHICS, 0, CHOICES(kSsTunic), "default", nullptr, nullptr, 96,
++     "Player 1's tunic",
++     "Split-screen: the colour of player 1's Link's tunic, and of the clothes he starts in. The game's "
++     "own: green (a blue shirt at the start)."},
++    {"COS_SS_P2_TUNIC", "Túnica del jugador 2",
++     "Pantalla dividida: color de la túnica del Link del jugador 2, también la ropa con la que empieza.",
++     PC_SETTING_TAB_GRAPHICS, 0, CHOICES(kSsTunic), "red", nullptr, nullptr, 97,
++     "Player 2's tunic",
++     "Split-screen: the colour of player 2's Link's tunic, and of the clothes he starts in."},
+     {"COS_ASPECT", "Relación de aspecto", "Imagen panorámica 16:9 o la 4:3 original de la GameCube.",
+      PC_SETTING_TAB_GRAPHICS, PC_SETTING_RESTART, CHOICES(kAspect), kSwitch ? "16:9" : "4:3", nullptr, nullptr,
+      70,
+diff --git a/native/src/pc/game_hooks/pc_splitscreen.cpp b/native/src/pc/game_hooks/pc_splitscreen.cpp
+new file mode 100644
+index 0000000..c5bfc27
+--- /dev/null
++++ b/native/src/pc/game_hooks/pc_splitscreen.cpp
+@@ -0,0 +1,910 @@
++// Split-screen co-op: Player 2's Link, camera and context, and who leads.
++// See pc/pc_splitscreen.h and docs/SPLITSCREEN.md.
++
++#include "d/dolzel.h" // IWYU pragma: keep
++#include "pc/pc_splitscreen.h"
++#include "pc/pc_settings.h"
++#include "pc_internal.h"
++
++#include "JSystem/J3DGraphBase/J3DSys.h"
++#include "JSystem/JKernel/JKRExpHeap.h"
++#include "JSystem/JKernel/JKRHeap.h"
++#include "SSystem/SComponent/c_malloc.h"
++#include "d/actor/d_a_player.h"
++#include "d/d_attention.h"
++#include "d/d_bg_s_gnd_chk.h"
++#include "d/d_camera.h"
++#include "d/d_com_inf_game.h"
++#include "d/d_meter.h"
++#include "f_op/f_op_actor_mng.h"
++#include "f_op/f_op_camera.h"
++#include "f_op/f_op_camera_mng.h"
++#include "f_op/f_op_draw_iter.h"
++#include "f_op/f_op_msg.h"
++#include "f_pc/f_pc_base.h"
++#include "f_pc/f_pc_executor.h"
++#include "f_pc/f_pc_manager.h"
++#include "f_pc/f_pc_name.h"
++#include "m_Do/m_Do_controller_pad.h"
++#include "m_Do/m_Do_ext.h"
++#include "m_Do/m_Do_lib.h"
++#include "m_Do/m_Do_machine.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <unistd.h>
++#include <unordered_set>
++#include <utility>
++#include <vector>
++
++pc_ss_ctx_t g_pc_ss_ctx = {0, 0};
++
++namespace {
++
++const char kSettingKey[] = "COS_SPLITSCREEN";
++
++// Player 2 is brought back next to Player 1 past these distances, or after this long in another
++// room.
++constexpr f32 kLeashDistance = 2000.0f;
++constexpr f32 kHardLeashDistance = 4500.0f;
++// At sea the players may sail further apart (the islands load around the lead).
++constexpr f32 kSailingLeashDistance = 8000.0f;
++constexpr f32 kSailingHardLeashDistance = 12000.0f;
++constexpr int kSeparatedFramesLimit = 45;
++constexpr int kPruneInterval = 60;
++constexpr int kPendingDeleteGiveUpFrames = 300;
++
++constexpr fpc_ProcID kNoProc = fpcM_ERROR_PROCESS_ID_e;
++
++// Processes owned by Player 2 (s_owned) and Player 1 (s_ownedP1): each player's own processes
++// (their Link, camera, boat, and what those create) run as that player; anything else as the lead.
++std::unordered_set<fpc_ProcID> s_owned;
++std::unordered_set<fpc_ProcID> s_ownedP1;
++// Player 2's processes that were told to go and have not been deleted yet. A process leaves the
++// executor (search stops finding it) as soon as it is queued for deletion, but its delete method
++// runs later; the next Player 2 is not created until the last one is really gone.
++std::unordered_set<fpc_ProcID> s_pendingDelete;
++int s_pendingDeleteFrames = 0;
++fpc_ProcID s_p2LinkId = kNoProc;
++fpc_ProcID s_p2CameraId = kNoProc;
++fpc_ProcID s_p2ShipId = kNoProc;
++
++// The lead is the player the world follows: whose Link the NPCs, events, doors, rooms and menus
++// see as "the player", and whose camera shows the cutscenes. It is whoever last talked to
++// someone, opened a door or a chest, got an item or paused (Player 1 when a scene starts).
++uint8_t s_lead = 0;
++// Context scopes in progress, and the owner (0, 1, or -1 for the world) of the process running
++// now; what a process creates belongs to its owner.
++int s_scopeDepth = 0;
++int s_curOwner = -1;
++bool s_inPass = false;
++bool s_bringPlayer1Requested = false;
++// Whether Player 2's camera is up, worked out once a frame: pc_ss_active() is asked for every
++// process drawn, and looking a process up walks the process list.
++bool s_p2CameraReady = false;
++bool s_enabled = false;
++
++bool s_sceneActive = false;
++bool s_spawnedThisScene = false;
++bool s_inDraw = false;
++uint8_t s_passCamera = 0;  // physical camera of the half being drawn
++bool s_extraPass = false;
++bool s_suspended = false;
++bool s_respawnRequested = false;
++int s_cooldown = 0;
++int s_separatedFrames = 0;
++int s_pruneTimer = 0;
++
++void* s_p2AttentionMem = nullptr;
++dAttention_c* s_p2Attention = nullptr;
++
++// The per-frame HUD state that belongs to whichever Link is running: the button prompts it sets
++// and its air meter. The live copy is the running player's; the bank holds the other player's.
++struct Bank {
++    s32 airMeter = 0;
++    s32 itemTimeMax = 0;
++    bool swimTimerStatus = false;
++    u8 status[6] = {};
++};
++Bank s_bank;
++
++dComIfG_play_c& play() { return g_dComIfG_gameInfo.play; }
++
++void swapBank() {
++    dComIfG_play_c& p = play();
++    std::swap(p.mAirMeter, s_bank.airMeter);
++    std::swap(p.mItemTimeMax, s_bank.itemTimeMax);
++    std::swap(p.mItemSwimTimerStatus, s_bank.swimTimerStatus);
++    u8* live[6] = {&p.mRStatus, &p.mAStatus, &p.mDoStatus, &p.mRStatusForce, &p.mAStatusForce, &p.mDoStatusForce};
++    for (int i = 0; i < 6; i++) {
++        std::swap(*live[i], s_bank.status[i]);
++    }
++}
++
++void initBankFromLive() {
++    s_bank = Bank();
++    s_bank.airMeter = play().mAirMeter;
++    s_bank.itemTimeMax = play().mItemTimeMax;
++}
++
++void switchTo(pc_ss_ctx_t to) {
++    if (to.player != g_pc_ss_ctx.player) {
++        swapBank();
++    }
++    g_pc_ss_ctx = to;
++}
++
++int ownerOf(const base_process_class* proc) {
++    if (proc == nullptr) {
++        return -1;
++    }
++    if (!s_owned.empty() && s_owned.count(proc->mBsPcId) != 0) {
++        return 1;
++    }
++    if (!s_ownedP1.empty() && s_ownedP1.count(proc->mBsPcId) != 0) {
++        return 0;
++    }
++    return -1;
++}
++
++int windowCountNow();
++void setLead(uint8_t lead, const char* why);
++
++// The camera the scene is being drawn for: the half's while a half is drawn; otherwise the first
++// half's (Player 1's), or the lead's when the screen is not split.
++uint8_t passCamera() {
++    if (s_inPass) {
++        return s_passCamera;
++    }
++    return windowCountNow() > 1 ? 0 : s_lead;
++}
++
++// The context outside any process: the lead's.
++pc_ss_ctx_t topCtx() {
++    return {s_lead, s_inPass ? s_passCamera : s_lead};
++}
++
++void leaveScope(pc_ss_ctx_t saved, int savedOwner) {
++    s_scopeDepth--;
++    s_curOwner = savedOwner;
++    // The outermost scope goes back to the lead's context, which may have changed while it ran.
++    const pc_ss_ctx_t to = s_scopeDepth == 0 ? topCtx() : saved;
++    if (to.player != g_pc_ss_ctx.player || to.camera != g_pc_ss_ctx.camera) {
++        switchTo(to);
++    }
++}
++
++bool isCameraProc(const base_process_class* proc) {
++    return proc->mProcName == fpcNm_CAMERA_e || proc->mProcName == fpcNm_CAMERA2_e;
++}
++
++bool procAlive(fpc_ProcID id) {
++    return id != kNoProc && (fpcEx_SearchByID(id) != NULL || fpcM_IsCreating(id));
++}
++
++bool procCreated(fpc_ProcID id) {
++    return id != kNoProc && fpcEx_SearchByID(id) != NULL && !fpcM_IsCreating(id);
++}
++
++void deleteProc(fpc_ProcID id) {
++    if (base_process_class* proc = fpcEx_SearchByID(id)) {
++        fpcM_Delete(proc);
++    }
++}
++
++void log(const char* what) {
++    pc::writef(STDERR_FILENO, "[cos] splitscreen: %s\n", what);
++}
++
++void createAttention() {
++    if (s_p2Attention != nullptr) {
++        return;
++    }
++    s_p2AttentionMem = JKRHeap::alloc(sizeof(dAttention_c), 4, mDoExt_getGameHeap());
++    if (s_p2AttentionMem == nullptr) {
++        log("no memory for Player 2's lock-on");
++        return;
++    }
++    // Run() calls Init() with Player 2 once they are there.
++    s_p2Attention = new (s_p2AttentionMem) dAttention_c(NULL, PAD_1);
++    play().mpPlayer2Attention = s_p2Attention;
++}
++
++void destroyAttention() {
++    play().mpPlayer2Attention = nullptr;
++    if (s_p2Attention != nullptr) {
++        s_p2Attention->~dAttention_c();
++        s_p2Attention = nullptr;
++    }
++    if (s_p2AttentionMem != nullptr) {
++        JKRHeap::free(s_p2AttentionMem, NULL);
++        s_p2AttentionMem = nullptr;
++    }
++}
++
++void setupTables() {
++    // Window 1 is drawn full size, like window 0, by a camera of half the aspect ratio; the
++    // painter then puts each in its half of the screen.
++    play().setWindow(1, 0.0f, 0.0f, mDoMch_render_c::getFbWidth(), mDoMch_render_c::getEfbHeight(), 0.0f, 1.0f, 1,
++                     2);
++    play().setCameraInfoPhysical(1, NULL, 1, 1, -1);
++    play().setPlayerInfoPhysical(1, NULL, 1);
++    play().mCameraInfo[1].mCameraZoomScale = play().mCameraInfo[0].mCameraZoomScale;
++    play().mCameraInfo[1].mCameraZoomForcus = play().mCameraInfo[0].mCameraZoomForcus;
++}
++
++bool groundNear(cXyz* pos, f32 refY, f32 maxStep) {
++    dBgS_GndChk gnd;
++    cXyz probe(pos->x, refY + 60.0f, pos->z);
++    gnd.SetPos(&probe);
++    const f32 y = dComIfG_Bgsp()->GroundCross(&gnd);
++    if (y == -G_CM3D_F_INF || std::fabs(y - refY) > maxStep) {
++        return false;
++    }
++    pos->y = y;
++    return true;
++}
++
++cXyz spawnPosition(fopAc_ac_c* next) {
++    // Beside the Link joined (not behind: that is in front of their camera), on ground at their
++    // height; else behind or in front (on a narrow pier there may be only one way). On them when
++    // there is none (at sea).
++    static const s16 kDirs[] = {(s16)0xC000, 0x4000, (s16)0x8000, 0x0000};
++    static const f32 kDists[] = {100.0f, 70.0f};
++    for (f32 d : kDists) {
++        for (s16 dir : kDirs) {
++            const s16 a = next->shape_angle.y + dir;
++            cXyz pos(next->current.pos.x + cM_ssin(a) * d, next->current.pos.y, next->current.pos.z + cM_scos(a) * d);
++            if (groundNear(&pos, next->current.pos.y, 30.0f)) {
++                return pos;
++            }
++        }
++    }
++    return next->current.pos;
++}
++
++void spawn(fopAc_ac_c* p1) {
++    setupTables();
++    createAttention();
++    initBankFromLive();
++
++    cXyz pos = spawnPosition(p1);
++    csXyz angle(0, p1->shape_angle.y, 0);
++    // Room bits from Player 1's room; 0x40: not a restart point; start event 0xFF: none.
++    const u32 params = 0xFF000000u | 0x40u | (static_cast<u32>(fopAcM_GetRoomNo(p1)) & 0x3F);
++
++    pc_ss_scoped_ctx ctx(1, 1);
++
++    auto* camPrm = static_cast<fopCamM_prm_class*>(cMl::memalignB(-4, sizeof(fopCamM_prm_class)));
++    if (camPrm == nullptr) {
++        log("no memory for Player 2's camera");
++        return;
++    }
++    std::memset(camPrm, 0, sizeof(fopCamM_prm_class));
++    // Camera index 1 (the camera's parameter, host order on PC). The game's unused second
++    // camera profile skips the minimap.
++    camPrm->base.parameters = 1;
++    s_p2CameraId = fopCamM_Create(1, fpcNm_CAMERA2_e, camPrm);
++
++    // Room -1, as Player 1 is created: the actor is not deleted with a room.
++    s_p2LinkId = fopAcM_create(fpcNm_PLAYER_e, params, &pos, -1, &angle);
++
++    s_suspended = false;
++    s_respawnRequested = false;
++    s_separatedFrames = 0;
++    s_spawnedThisScene = true;
++    pc::writef(STDERR_FILENO, "[cos] splitscreen: Player 2 joins (link %u, camera %u)\n", s_p2LinkId, s_p2CameraId);
++}
++
++void despawn() {
++    // Everything of Player 2's goes: their Link, camera, and what the Link had out (a bomb, an
++    // arrow), which would otherwise look for a Player 2 who is not there.
++    const std::vector<fpc_ProcID> ids(s_owned.begin(), s_owned.end());
++    for (fpc_ProcID id : ids) {
++        if (procCreated(id) && fpcM_Delete(fpcEx_SearchByID(id))) {
++            s_pendingDelete.insert(id);
++        }
++    }
++    s_pendingDeleteFrames = 0;
++
++    // Nothing may find the old Player 2 from here on: not the next Player 2's camera looking for
++    // its player, not the lock-on.
++    play().setPlayerInfoPhysical(1, NULL, 1);
++    play().mPlayer2LinkPtr = NULL;
++    play().mPlayer2ShipPtr = NULL;
++    play().mCameraInfo[1].mpCamera = NULL;
++    std::memset(play().mPlayerStatus[1], 0, sizeof(play().mPlayerStatus[1]));
++
++    s_p2LinkId = kNoProc;
++    s_p2CameraId = kNoProc;
++    s_p2ShipId = kNoProc;
++    s_p2CameraReady = false;
++    s_suspended = false;
++    s_respawnRequested = false;
++    s_separatedFrames = 0;
++    setLead(0, "Player 2 leaves");
++}
++
++void prune() {
++    for (auto it = s_owned.begin(); it != s_owned.end();) {
++        if (!procAlive(*it) && s_pendingDelete.count(*it) == 0) {
++            it = s_owned.erase(it);
++        } else {
++            ++it;
++        }
++    }
++    for (auto it = s_ownedP1.begin(); it != s_ownedP1.end();) {
++        it = procAlive(*it) ? std::next(it) : s_ownedP1.erase(it);
++    }
++}
++
++void setLead(uint8_t lead, const char* why) {
++    if (lead == s_lead) {
++        return;
++    }
++    s_lead = lead;
++    pc::writef(STDERR_FILENO, "[cos] splitscreen: Player %d leads (%s)\n", lead + 1, why);
++    if (s_scopeDepth == 0) {
++        switchTo(topCtx());
++    }
++    // Otherwise the outermost scope switches as it ends.
++}
++
++// Player 1's Link and camera, and from them on what they create.
++void markPlayer1(fopAc_ac_c* p1) {
++    s_ownedP1.insert(fopAcM_GetID(p1));
++    if (camera_class* cam = play().getCameraPhysical(0)) {
++        s_ownedP1.insert(fpcM_GetID(cam));
++    }
++}
++
++// Player 1 cannot be created again (they are the Link the stage made), so when Player 2 leads
++// and they get separated, Player 1 is moved to Player 2.
++void bringPlayer1ToLead(fopAc_ac_c* p1, fopAc_ac_c* p2) {
++    cXyz pos = spawnPosition(p2);
++    pc_ss_scoped_ctx ctx(0, 0);
++    static_cast<daPy_py_c*>(p1)->setPlayerPosAndAngle(&pos, p2->shape_angle.y);
++    fopAcM_SetRoomNo(p1, fopAcM_GetRoomNo(p2));
++}
++
++bool worldBusy() {
++    // A cutscene, a stage change, or a menu over the game.
++    return dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage() || dMenu_flag();
++}
++
++bool riding(int player) {
++    return (play().mPlayerStatus[player][0] & daPyStts0_SHIP_RIDE_e) != 0;
++}
++
++// Player 2's own boat, beside Player 1's whenever Player 1's is out. It is Player 2's like their
++// Link: it runs in their context, so the boat lookups in it, in their Link and in their camera
++// find it, and it goes with them.
++void updatePlayer2Ship() {
++    fopAc_ac_c* p1Ship = play().getShipPhysical(0);
++    const bool p1ShipOut = p1Ship != nullptr && !fpcM_IsCreating(fopAcM_GetID(p1Ship));
++    const bool have = procAlive(s_p2ShipId);
++    if (!p1ShipOut) {
++        // Not from under Player 2.
++        if (have && procCreated(s_p2ShipId) && !riding(1)) {
++            deleteProc(s_p2ShipId);
++            s_p2ShipId = kNoProc;
++            play().mPlayer2ShipPtr = NULL;
++        }
++        return;
++    }
++    if (have) {
++        return;
++    }
++    // Alongside Player 1's, on their right, far enough out that the boats do not touch.
++    const s16 side = p1Ship->shape_angle.y - 0x4000;
++    cXyz pos(p1Ship->current.pos.x + cM_ssin(side) * 650.0f, p1Ship->current.pos.y,
++             p1Ship->current.pos.z + cM_scos(side) * 650.0f);
++    csXyz angle(0, p1Ship->shape_angle.y, 0);
++    pc_ss_scoped_ctx ctx(1, 1);
++    // Room -1, like the Links: the boat is not deleted with a room.
++    s_p2ShipId = fopAcM_create(fpcNm_SHIP_e, fopAcM_GetParam(p1Ship), &pos, -1, &angle);
++    pc::writef(STDERR_FILENO, "[cos] splitscreen: Player 2's boat (%u)\n", s_p2ShipId);
++}
++
++void readSetting() {
++    const char* v = pc_settings_get(kSettingKey);
++    s_enabled = v != nullptr && v[0] == '1';
++}
++
++void registerSetting() {
++    static bool done = false;
++    if (done) {
++        return;
++    }
++    done = true;
++    static const PcSettingChoice kChoices[] = {
++        {"0", "Desactivado", "Off"},
++        {"1", "Dos jugadores", "Two players"},
++    };
++    PcSettingDesc d = {};
++    d.key = kSettingKey;
++    d.label = "Pantalla dividida (cooperativo)";
++    d.help = "Un segundo Link con el mando 2, cada uno con su mitad de la pantalla. Desactiva los 60 fps.";
++    d.labelEn = "Split-screen co-op";
++    d.helpEn = "A second Link on controller 2, half of the screen each. Turns 60 fps interpolation off.";
++    d.tab = PC_SETTING_TAB_GRAPHICS;
++    d.flags = 0;
++    d.choices = kChoices;
++    d.choiceCount = 2;
++    d.defaultValue = "0";
++    d.apply = [](const char*, const char*, void*) { readSetting(); };
++    d.order = 95;  // above the two tunic rows (pc_menu.cpp, 96 and 97)
++    pc_settings_register(&d);
++    readSetting();
++}
++
++}  // namespace
++
++void pc_ss_init() {
++    registerSetting();
++}
++
++bool pc_ss_enabled() {
++    return s_enabled;
++}
++
++fopAc_ac_c* pc_ss_player2() {
++    return play().getPlayerPhysical(1);
++}
++
++bool pc_ss_is_player2(const fopAc_ac_c* actor) {
++    return actor != nullptr && actor == pc_ss_player2();
++}
++
++bool pc_ss_active() {
++    return s_sceneActive && s_enabled && !s_suspended && s_p2CameraReady && play().getCameraPhysical(1) != NULL &&
++           pc_ss_player2() != nullptr;
++}
++
++int pc_ss_window_count() {
++    return pc_ss_active() ? 2 : 1;
++}
++
++namespace {
++int windowCountNow() {
++    return pc_ss_window_count();
++}
++}  // namespace
++
++float pc_ss_aspect_scale() {
++    // Player 2's camera is drawn at half the width as soon as it exists, so the view does not
++    // jump when the screen splits.
++    return (s_sceneActive && s_enabled && s_p2LinkId != kNoProc) ? 0.5f : 1.0f;
++}
++
++bool pc_ss_is_player_link(const fopAc_ac_c* actor) {
++    if (!s_sceneActive || actor == nullptr || pc_ss_player2() == nullptr) {
++        return false;
++    }
++    return actor == play().getLinkPhysical(0) || actor == play().getLinkPhysical(1);
++}
++
++bool pc_ss_is_non_lead_link(const fopAc_ac_c* actor) {
++    return pc_ss_is_player_link(actor) && actor != play().getLinkPhysical(s_lead);
++}
++
++bool pc_ss_is_player_ship(const fopAc_ac_c* actor) {
++    if (!s_sceneActive || actor == nullptr || play().getShipPhysical(1) == nullptr) {
++        return false;
++    }
++    return actor == play().getShipPhysical(0) || actor == play().getShipPhysical(1);
++}
++
++bool pc_ss_hidden_from(const fopAc_ac_c* actor, const fopAc_ac_c* owner) {
++    if (pc_ss_is_player_link(actor)) {
++        return true;
++    }
++    fopAc_ac_c* otherShip = play().getShipPhysical(pc_ss_link_player(owner) ^ 1);
++    return otherShip != nullptr && actor == otherShip && play().getShipPhysical(1) != nullptr;
++}
++
++int pc_ss_link_player(const fopAc_ac_c* link) {
++    return (link != nullptr && link == play().getLinkPhysical(1)) ? 1 : 0;
++}
++
++bool pc_ss_links_share_model_data() {
++    return s_spawnedThisScene;
++}
++
++void pc_ss_on_proc_id_made(fpc_ProcID id) {
++    if (s_curOwner == 1) {
++        s_owned.insert(id);
++    } else if (s_curOwner == 0) {
++        s_ownedP1.insert(id);
++    }
++}
++
++void pc_ss_on_proc_deleted(fpc_ProcID id) {
++    if (!s_owned.empty()) {
++        s_owned.erase(id);
++    }
++    if (!s_ownedP1.empty()) {
++        s_ownedP1.erase(id);
++    }
++    if (!s_pendingDelete.empty()) {
++        s_pendingDelete.erase(id);
++    }
++}
++
++bool pc_ss_is_suspended_proc(const base_process_class* proc) {
++    return s_suspended && ownerOf(proc) == (s_lead ^ 1);
++}
++
++int pc_ss_owner_of(const base_process_class* proc) {
++    return ownerOf(proc);
++}
++
++int pc_ss_current_owner() {
++    return s_curOwner;
++}
++
++bool pc_ss_set_in_draw(bool in_draw) {
++    const bool was = s_inDraw;
++    s_inDraw = in_draw;
++    return was;
++}
++
++pc_ss_process_scope::pc_ss_process_scope(const base_process_class* proc)
++    : mSaved(g_pc_ss_ctx), mSavedOwner(s_curOwner), mChanged(false) {
++    if (s_owned.empty() && s_lead == 0 && s_scopeDepth == 0 && !s_inPass) {
++        return;  // one player: nothing to switch
++    }
++    mChanged = true;
++    s_scopeDepth++;
++    if (proc == nullptr) {
++        return;
++    }
++    // A player's process runs as that player, anything else as the lead. Draws use the camera of
++    // the half being drawn, except a camera's own draw, which sees itself as its player's camera.
++    const int owner = ownerOf(proc);
++    s_curOwner = owner;
++    const uint8_t player = owner >= 0 ? static_cast<uint8_t>(owner) : s_lead;
++    pc_ss_ctx_t to;
++    to.player = player;
++    to.camera = (s_inDraw && !isCameraProc(proc)) ? passCamera() : player;
++    if (to.player != g_pc_ss_ctx.player || to.camera != g_pc_ss_ctx.camera) {
++        switchTo(to);
++    }
++}
++
++pc_ss_process_scope::~pc_ss_process_scope() {
++    if (mChanged) {
++        leaveScope(mSaved, mSavedOwner);
++    }
++}
++
++pc_ss_scoped_ctx::pc_ss_scoped_ctx(uint8_t player, uint8_t camera) : mSaved(g_pc_ss_ctx), mSavedOwner(s_curOwner) {
++    s_scopeDepth++;
++    s_curOwner = player;
++    const pc_ss_ctx_t to = {player, camera};
++    if (to.player != g_pc_ss_ctx.player || to.camera != g_pc_ss_ctx.camera) {
++        switchTo(to);
++    }
++}
++
++pc_ss_scoped_ctx::~pc_ss_scoped_ctx() {
++    leaveScope(mSaved, mSavedOwner);
++}
++
++void pc_ss_on_scene_play_create() {
++    registerSetting();
++    readSetting();
++    if (g_pc_ss_ctx.player != 0) {
++        swapBank();
++    }
++    g_pc_ss_ctx = {0, 0};
++    s_p2CameraReady = false;
++    s_lead = 0;
++    s_scopeDepth = 0;
++    s_curOwner = -1;
++    s_inPass = false;
++    s_bringPlayer1Requested = false;
++    s_owned.clear();
++    s_ownedP1.clear();
++    s_pendingDelete.clear();
++    s_p2LinkId = kNoProc;
++    s_p2CameraId = kNoProc;
++    s_p2ShipId = kNoProc;
++    s_suspended = false;
++    s_respawnRequested = false;
++    s_cooldown = 30;
++    s_separatedFrames = 0;
++    s_p2Attention = nullptr;
++    s_p2AttentionMem = nullptr;
++    play().mpPlayer2Attention = nullptr;
++    play().mPlayer2LinkPtr = nullptr;
++    play().mPlayer2ShipPtr = nullptr;
++    std::memset(play().mPlayerStatus[1], 0, sizeof(play().mPlayerStatus[1]));
++    setupTables();
++    s_spawnedThisScene = false;
++    s_sceneActive = true;
++}
++
++void pc_ss_on_scene_play_delete() {
++    s_sceneActive = false;
++    s_p2CameraReady = false;
++    setLead(0, "scene ends");
++    destroyAttention();
++    s_p2LinkId = kNoProc;
++    s_p2CameraId = kNoProc;
++    s_suspended = false;
++}
++
++void pc_ss_on_scene_play_execute() {
++    if (!s_sceneActive) {
++        return;
++    }
++    readSetting();
++
++    if (++s_pruneTimer >= kPruneInterval) {
++        s_pruneTimer = 0;
++        prune();
++    }
++    s_p2CameraReady = procCreated(s_p2CameraId);
++
++    fopAc_ac_c* p1 = play().getPlayerPhysical(0);
++    const bool want = s_enabled && p1 != nullptr && !fpcM_IsCreating(fopAcM_GetID(p1));
++    const bool linkAlive = procAlive(s_p2LinkId);
++    const bool cameraAlive = procAlive(s_p2CameraId);
++
++    if (!want) {
++        if ((linkAlive || cameraAlive) && !fpcM_IsCreating(s_p2LinkId) && !fpcM_IsCreating(s_p2CameraId)) {
++            despawn();
++        }
++        setLead(0, "split-screen off");
++        return;
++    }
++
++    markPlayer1(p1);
++    const bool busy = worldBusy();
++
++    if (!s_pendingDelete.empty()) {
++        if (++s_pendingDeleteFrames < kPendingDeleteGiveUpFrames) {
++            return;
++        }
++        pc::writef(STDERR_FILENO, "[cos] splitscreen: %zu of Player 2's processes were not deleted after %d frames\n",
++               s_pendingDelete.size(), s_pendingDeleteFrames);
++        s_pendingDelete.clear();
++    }
++
++    if (!linkAlive) {
++        // Gone (or never there): start again once Player 1 is free.
++        setLead(0, "Player 2 gone");
++        if (cameraAlive && procCreated(s_p2CameraId)) {
++            deleteProc(s_p2CameraId);
++            s_p2CameraId = kNoProc;
++            s_p2CameraReady = false;
++        }
++        s_suspended = false;
++        if (s_cooldown > 0) {
++            s_cooldown--;
++            return;
++        }
++        if (!busy && !cameraAlive) {
++            spawn(p1);
++        }
++        return;
++    }
++
++    s_suspended = busy;
++    fopAc_ac_c* p2 = pc_ss_player2();
++    if (s_suspended || p2 == nullptr || fpcM_IsCreating(s_p2LinkId)) {
++        s_separatedFrames = 0;
++        return;
++    }
++
++    // The follower is brought back to the lead: Player 2 is created again next to Player 1;
++    // Player 1 is moved to Player 2.
++    fopAc_ac_c* lead = s_lead == 0 ? p1 : p2;
++    fopAc_ac_c* follower = s_lead == 0 ? p2 : p1;
++    const f32 dist = (follower->current.pos - lead->current.pos).abs();
++    const bool sailing = riding(0) || riding(1);
++    const f32 leash = sailing ? kSailingLeashDistance : kLeashDistance;
++    const f32 hardLeash = sailing ? kSailingHardLeashDistance : kHardLeashDistance;
++    // On the sea the rooms are the islands: being in another one is no reason to come back.
++    const bool apart = dist > leash || (!sailing && fopAcM_GetRoomNo(follower) != fopAcM_GetRoomNo(lead));
++    s_separatedFrames = apart ? s_separatedFrames + 1 : 0;
++    // Player 1 is not moved off their boat (Player 2 is created again, on foot or swimming).
++    const bool separated = (dist > hardLeash || s_separatedFrames > kSeparatedFramesLimit) &&
++                           !(s_lead == 1 && riding(0));
++    if (s_lead == 0 && (s_respawnRequested || separated)) {
++        pc::writef(STDERR_FILENO, "[cos] splitscreen: bringing Player 2 back to Player 1 (distance %.0f, requested %d)\n",
++               dist, s_respawnRequested ? 1 : 0);
++        despawn();
++        s_cooldown = 2;
++        return;
++    }
++    if (s_lead == 1 && (s_bringPlayer1Requested || separated)) {
++        pc::writef(STDERR_FILENO, "[cos] splitscreen: bringing Player 1 to Player 2 (distance %.0f, requested %d)\n", dist,
++               s_bringPlayer1Requested ? 1 : 0);
++        bringPlayer1ToLead(p1, p2);
++        s_separatedFrames = 0;
++    }
++    s_respawnRequested = false;
++    s_bringPlayer1Requested = false;
++
++    updatePlayer2Ship();
++
++    if (s_p2Attention != nullptr && procCreated(s_p2CameraId)) {
++        pc_ss_scoped_ctx ctx(1, 1);
++        if (s_p2Attention->Owner() != NULL) {
++            s_p2Attention->Run(-1);
++        } else {
++            s_p2Attention->Init(dComIfGp_getPlayer(0), 0);
++        }
++    }
++}
++
++void pc_ss_on_pads_read() {
++    // Pausing is the lead's (the menus read the lead's controller), so the other player pressing
++    // Start takes the lead first.
++    if (!s_sceneActive || s_suspended || pc_ss_player2() == nullptr || s_p2LinkId == kNoProc ||
++        dComIfGp_event_runCheck() || dMenu_flag())
++    {
++        return;
++    }
++    const uint8_t other = s_lead ^ 1;
++    if (g_mDoCPd_cpadInfo[other].mButtonTrig.start) {
++        setLead(other, "pause");
++    }
++}
++
++void pc_ss_on_scene_play_draw() {
++    if (!s_sceneActive || s_suspended || s_p2Attention == nullptr || !procCreated(s_p2CameraId) ||
++        pc_ss_player2() == nullptr || s_p2Attention->Owner() == NULL)
++    {
++        return;
++    }
++    pc_ss_scoped_ctx ctx(1, g_pc_ss_ctx.camera);
++    s_p2Attention->Draw();
++}
++
++void pc_ss_begin_pass(int window) {
++    s_passCamera = static_cast<uint8_t>(window);
++    s_inPass = true;
++    switchTo(topCtx());
++}
++
++void pc_ss_end_pass() {
++    s_passCamera = 0;
++    s_inPass = false;
++    switchTo(topCtx());
++}
++
++namespace {
++
++// The view of a camera as the draws and culling read it: what the camera's view_setup and draw
++// set when it is the one drawn.
++void publishView(int physicalCamera) {
++    auto* cam = reinterpret_cast<camera_process_class*>(play().getCameraPhysical(physicalCamera));
++    if (cam == nullptr) {
++        return;
++    }
++    view_class* view = &cam->view;
++    dDlst_window_c* window = play().getWindow(play().mCameraInfo[physicalCamera].mDlstWindowIdx);
++    j3dSys.setViewMtx(view->mViewMtx);
++    dComIfGd_setWindow(window);
++    dComIfGd_setViewport(window->getViewPort());
++    dComIfGd_setView(view);
++    f32 far;
++    if (dComIfGp_getScopeMesgStatus() != fopMsgStts_MSG_UNK0_e) {
++        far = view->mFar;
++    } else {
++        far = dStage_stagInfo_GetCullPoint(dComIfGp_getStageStagInfo());
++    }
++    mDoLib_clipper::setup(view->mFovy, view->mAspect, view->mNear, far);
++}
++
++bool drawsInExtraView(const base_process_class* proc) {
++    // The 3D world: actors and the sky and weather; not the cameras (their draw sets the view,
++    // the listener and the minimap) or the HUD and messages.
++    return proc != nullptr && !isCameraProc(proc) &&
++           (fopAc_IsActor((void*)proc) || proc->mProcName == fpcNm_KANKYO_e);
++}
++
++}  // namespace
++
++void pc_ss_redraw_scene_for_window() {
++    dDlst_list_c& dl = g_dComIfG_gameInfo.drawlist;
++    const dDlst_list_c::Cursors2D cursors = dl.save2DCursors();
++    dl.reset3D();
++
++    publishView(1);
++
++    s_extraPass = true;
++    for (create_tag_class* i = fopDwIt_Begin(); i != NULL; i = fopDwIt_Next(i)) {
++        base_process_class* proc = static_cast<base_process_class*>(i->mpTagData);
++        if (drawsInExtraView(proc)) {
++            fpcM_Draw(proc);
++        }
++    }
++    if (!dMenu_flag()) {
++        dComIfGp_particle_drawModelParticle();
++        dComIfGp_drawMagma();
++        dComIfGp_drawGrass();
++        dComIfGp_drawTree();
++        dComIfGp_drawWood();
++        dComIfGp_drawFlower();
++        {
++            pc_ss_scoped_ctx p1(0, g_pc_ss_ctx.camera);
++            dComIfGp_getAttention().Draw();
++        }
++        pc_ss_on_scene_play_draw();
++    }
++    s_extraPass = false;
++
++    dl.restore2DCursors(cursors);
++}
++
++void pc_ss_restore_view() {
++    publishView(passCamera());
++}
++
++bool pc_ss_in_extra_view_pass() {
++    return s_extraPass;
++}
++
++bool pc_ss_paint_is_repeat() {
++    return s_inPass && s_passCamera > 0;
++}
++
++bool pc_ss_is_pass_camera(const camera_class* camera) {
++    const camera_class* pass = play().getCameraPhysical(passCamera());
++    return pass == nullptr || pass == camera;
++}
++
++bool pc_ss_is_audio_camera(const camera_class* camera) {
++    const camera_class* leadCam = play().getCameraPhysical(s_lead);
++    return leadCam == nullptr || leadCam == camera;
++}
++
++bool pc_ss_block_scene_change() {
++    if (g_pc_ss_ctx.player != s_lead) {
++        (g_pc_ss_ctx.player == 1 ? s_respawnRequested : s_bringPlayer1Requested) = true;
++        return true;
++    }
++    return false;
++}
++
++bool pc_ss_block_global_change() {
++    return g_pc_ss_ctx.player != s_lead;
++}
++
++bool pc_ss_block_event_order(uint16_t type) {
++    if (g_pc_ss_ctx.player == s_lead || s_curOwner < 0) {
++        return false;
++    }
++    // A player's own interaction (talking, a door, a chest, an item) makes them the lead; anything
++    // else they would start is left to the lead.
++    switch (type) {
++    case dEvtType_TALK_e:
++    case dEvtType_DOOR_e:
++    case dEvtType_ITEM_e:
++    case dEvtType_SHOWITEM_X_e:
++    case dEvtType_SHOWITEM_Y_e:
++    case dEvtType_SHOWITEM_Z_e:
++    case dEvtType_CATCH_e:
++    case dEvtType_TREASURE_e:
++        if (!dComIfGp_event_runCheck() && play().getEvent()->mOrderCount == 0) {
++            setLead(g_pc_ss_ctx.player, "interaction");
++            return false;
++        }
++        return true;
++    default:
++        return true;
++    }
++}
++
++bool pc_ss_drops_damage() {
++    return s_curOwner == 1;
++}
++
++int pc_ss_lead() {
++    return s_lead;
++}
+diff --git a/native/src/pc/game_hooks/pc_splitscreen_tunic.cpp b/native/src/pc/game_hooks/pc_splitscreen_tunic.cpp
+new file mode 100644
+index 0000000..775f987
+--- /dev/null
++++ b/native/src/pc/game_hooks/pc_splitscreen_tunic.cpp
+@@ -0,0 +1,515 @@
++// Split-screen: a tunic colour for each player. See pc/pc_splitscreen_tunic.h for the design.
++#include "d/dolzel.h" // IWYU pragma: keep
++#include "pc/pc_splitscreen_tunic.h"
++#include "pc/pc_harness.h"
++#include "pc/pc_settings.h"
++#include "pc_internal.h"
++
++#include "JSystem/J3DGraphAnimator/J3DModelData.h"
++#include "JSystem/J3DGraphBase/J3DTexture.h"
++#include "JSystem/JKernel/JKRExpHeap.h"
++#include "JSystem/JKernel/JKRHeap.h"
++#include "JSystem/JUtility/JUTNameTab.h"
++#include "d/actor/d_a_player_main.h"
++#include "m_Do/m_Do_ext.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <unistd.h>
++
++namespace {
++
++// --- Settings ------------------------------------------------------------------------------------
++
++struct Rgb {
++    float r, g, b;
++};
++
++// The menu's values (pc_menu.cpp, kSsTunic) and the colour each gives the tunic's main area; the
++// seams and lighter parts get darker and lighter shades of it. Index 0 keeps the game's colours;
++// "green" keeps the hero's clothes as the game has them and only makes the casual shirt green.
++struct Preset {
++    const char* value;
++    Rgb color;
++    bool gameHero;
++};
++const Preset kPresets[] = {
++    {"default", {0, 0, 0}, true},          {"red", {205, 52, 44}, false},     {"blue", {60, 110, 225}, false},
++    {"purple", {128, 72, 196}, false},     {"gold", {232, 184, 40}, false},   {"orange", {240, 128, 32}, false},
++    {"pink", {240, 122, 178}, false},      {"black", {52, 52, 60}, false},    {"white", {250, 250, 250}, false},
++    {"green", {90, 178, 74}, true},
++};
++constexpr int kPresetCount = (int)(sizeof(kPresets) / sizeof(kPresets[0]));
++
++const char* const kKeys[2] = {"COS_SS_P1_TUNIC", "COS_SS_P2_TUNIC"};
++// Without a value at all (the row not registered): player 1 the game's colours, player 2 red.
++const int kFallbackPreset[2] = {0, 1};
++
++int sPreset[2] = {-1, -1}; // -1: not read yet
++
++int presetOf(int player, const char* value) {
++    if (value == nullptr || value[0] == '\0') {
++        return kFallbackPreset[player];
++    }
++    for (int i = 0; i < kPresetCount; i++) {
++        if (strcmp(kPresets[i].value, value) == 0) {
++            return i;
++        }
++    }
++    return 0;
++}
++
++void onSetting(const char*, const char* value, void* user) {
++    const int player = (int)(intptr_t)user;
++    sPreset[player] = presetOf(player, value);
++}
++
++int presetFor(int player) {
++    if (sPreset[player] < 0) {
++        sPreset[player] = presetOf(player, pc_settings_get(kKeys[player]));
++        pc_settings_subscribe(kKeys[player], onSetting, (void*)(intptr_t)player);
++    }
++    return sPreset[player];
++}
++
++// --- Recolouring ---------------------------------------------------------------------------------
++// The tunic's pixels are picked out by hue, saturation and brightness: the greens of the hero's
++// clothes (hue 70-165; the hair's yellow is below 60, the skin and belt far below), the blues of
++// the casual shirt (hue 195-235; its palette has no other blue). Each becomes the chosen colour at
++// its own brightness relative to the main area's: darker ones scaled down, lighter ones (the hero's
++// light green undershirt) mixed toward white, so the hue stays and the shading is kept.
++
++enum class Outfit { Hero, Casual };
++
++constexpr Rgb kHeroReference = {90, 178, 74};    // the hero tunic's main green
++constexpr Rgb kCasualReference = {74, 117, 173}; // the casual shirt's main blue
++
++float smoothstep(float e0, float e1, float x) {
++    const float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
++    return t * t * (3.0f - 2.0f * t);
++}
++
++// 1 inside [lo, hi] degrees, falling to 0 over `soft` degrees either side.
++float hueBand(float hue, float lo, float hi, float soft) {
++    return std::min(smoothstep(lo - soft, lo, hue), 1.0f - smoothstep(hi, hi + soft, hue));
++}
++
++void toHsv(const Rgb& c, float& h, float& s, float& v) {
++    const float r = c.r / 255.0f, g = c.g / 255.0f, b = c.b / 255.0f;
++    const float mx = std::max({r, g, b}), mn = std::min({r, g, b});
++    const float d = mx - mn;
++    v = mx;
++    s = mx > 0.0f ? d / mx : 0.0f;
++    if (d <= 0.0f) {
++        h = 0.0f;
++    } else if (mx == r) {
++        h = 60.0f * std::fmod((g - b) / d + 6.0f, 6.0f);
++    } else if (mx == g) {
++        h = 60.0f * ((b - r) / d + 2.0f);
++    } else {
++        h = 60.0f * ((r - g) / d + 4.0f);
++    }
++}
++
++float tunicWeight(Outfit outfit, const Rgb& c) {
++    float h, s, v;
++    toHsv(c, h, s, v);
++    const float band = outfit == Outfit::Hero ? hueBand(h, 70.0f, 165.0f, 10.0f) : hueBand(h, 195.0f, 235.0f, 12.0f);
++    return band * smoothstep(0.15f, 0.25f, s) * smoothstep(0.05f, 0.12f, v);
++}
++
++float luma(const Rgb& c) {
++    return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
++}
++
++// The target at relative brightness k: darker scaled down, lighter mixed toward white by half the
++// excess (the hero's light green undershirt, k 1.4, becomes a lighter shade, not white).
++Rgb shade(const Rgb& target, float k) {
++    if (k <= 1.0f) {
++        return Rgb{target.r * k, target.g * k, target.b * k};
++    }
++    const float a = std::min(1.0f, (k - 1.0f) * 0.5f);
++    return Rgb{target.r + (255.0f - target.r) * a, target.g + (255.0f - target.g) * a,
++               target.b + (255.0f - target.b) * a};
++}
++
++Rgb recolor(Outfit outfit, const Rgb& c, const Rgb& target) {
++    const float w = tunicWeight(outfit, c);
++    if (w <= 0.0f) {
++        return c;
++    }
++    const Rgb& ref = outfit == Outfit::Hero ? kHeroReference : kCasualReference;
++    const Rgb m = shade(target, luma(c) / luma(ref));
++    return Rgb{c.r + (m.r - c.r) * w, c.g + (m.g - c.g) * w, c.b + (m.b - c.b) * w};
++}
++
++Rgb from565(u16 v) {
++    const unsigned r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
++    return Rgb{(float)((r << 3) | (r >> 2)), (float)((g << 2) | (g >> 4)), (float)((b << 3) | (b >> 2))};
++}
++
++int quantize(float x, int bits) {
++    const int max = (1 << bits) - 1;
++    return std::clamp((int)std::lround(x / 255.0f * (float)max), 0, max);
++}
++
++u16 to565(const Rgb& c) {
++    return (u16)((quantize(c.r, 5) << 11) | (quantize(c.g, 6) << 5) | quantize(c.b, 5));
++}
++
++// GX CMPR: 8-byte blocks of two big-endian RGB565 end colours and sixteen 2-bit indices. Only the
++// end colours change; a block keeps its mode (four colours when the first is greater, else three
++// and transparent), swapping its end colours and their indices when the new ones compare the
++// other way. (The pattern of Dusklight's split-screen colours.)
++void recolorCmpr(u8* data, size_t size, const Rgb& target) {
++    for (size_t off = 0; off + 8 <= size; off += 8) {
++        u8* block = data + off;
++        const u16 c0 = (u16)((block[0] << 8) | block[1]);
++        const u16 c1 = (u16)((block[2] << 8) | block[3]);
++        u16 n0 = to565(recolor(Outfit::Hero, from565(c0), target));
++        u16 n1 = to565(recolor(Outfit::Hero, from565(c1), target));
++        if (n0 == c0 && n1 == c1) {
++            continue;
++        }
++        if (c0 > c1) {
++            if (n0 == n1) {
++                if (n1 > 0) {
++                    n1--;
++                } else {
++                    n0++;
++                }
++            }
++            if (n0 < n1) {
++                std::swap(n0, n1);
++                for (int i = 4; i < 8; i++) {
++                    block[i] ^= 0x55; // 0<->1, 2<->3
++                }
++            }
++        } else if (n0 > n1) {
++            std::swap(n0, n1);
++            for (int i = 4; i < 8; i++) {
++                u8 swapped = 0;
++                for (int p = 0; p < 4; p++) {
++                    u8 idx = (block[i] >> (6 - 2 * p)) & 3;
++                    if (idx < 2) {
++                        idx ^= 1; // the end colours swap; the midpoint and transparent stay
++                    }
++                    swapped |= (u8)(idx << (6 - 2 * p));
++                }
++                block[i] = swapped;
++            }
++        }
++        block[0] = (u8)(n0 >> 8);
++        block[1] = (u8)n0;
++        block[2] = (u8)(n1 >> 8);
++        block[3] = (u8)n1;
++    }
++}
++
++// A palette of big-endian RGB565 or RGB5A3 entries.
++void recolorTlut(u8* data, int count, u8 tlutFormat, const Rgb& target) {
++    for (int i = 0; i < count; i++) {
++        u8* e = data + i * 2;
++        const u16 v = (u16)((e[0] << 8) | e[1]);
++        u16 n;
++        if (tlutFormat == GX_TL_RGB565) {
++            n = to565(recolor(Outfit::Casual, from565(v), target));
++        } else if (v & 0x8000) { // RGB5A3, opaque: RGB555
++            const unsigned r = (v >> 10) & 31, g = (v >> 5) & 31, b = v & 31;
++            const Rgb c = recolor(Outfit::Casual,
++                                  Rgb{(float)((r << 3) | (r >> 2)), (float)((g << 3) | (g >> 2)),
++                                      (float)((b << 3) | (b >> 2))},
++                                  target);
++            n = (u16)(0x8000 | (quantize(c.r, 5) << 10) | (quantize(c.g, 5) << 5) | quantize(c.b, 5));
++        } else { // RGB5A3, translucent: A3 RGB444
++            const unsigned r = (v >> 8) & 15, g = (v >> 4) & 15, b = v & 15;
++            const Rgb c = recolor(Outfit::Casual, Rgb{(float)(r * 17), (float)(g * 17), (float)(b * 17)}, target);
++            n = (u16)((v & 0x7000) | (quantize(c.r, 4) << 8) | (quantize(c.g, 4) << 4) | quantize(c.b, 4));
++        }
++        e[0] = (u8)(n >> 8);
++        e[1] = (u8)n;
++    }
++}
++
++// --- Texture table copies ------------------------------------------------------------------------
++
++// A J3DTexture entry's image and palette: offsets from the entry itself (J3DTexture::setResTIMG).
++const u8* imageOf(const ResTIMG* t) {
++    return (const u8*)t + (s32)(u32)t->imageOffset;
++}
++const u8* paletteOf(const ResTIMG* t) {
++    return (const u8*)t + (s32)(u32)t->paletteOffset;
++}
++
++struct Copy {
++    J3DTexture* texture = nullptr; // host memory: the table object and its texture objects
++    u8* block = nullptr;           // the game heap: the copied headers, then the recoloured data
++    JKRHeap* heap = nullptr;
++};
++
++struct LinkState {
++    daPy_lk_c* link = nullptr;
++    Copy copy;
++    // What the copy was made from; it is made again when any of it changes.
++    int preset = 0;
++    J3DTexture* original = nullptr;
++    u16 num = 0;
++    u16 entry = 0;
++    const u8* image = nullptr;
++    const u8* palette = nullptr;
++    u8 format = 0;
++    // While the Link draws: the model data whose table is the copy, and its own table.
++    J3DModelData* swappedData = nullptr;
++    J3DTexture* swappedFrom = nullptr;
++};
++
++// One per Link (two in split-screen, room for a Link being deleted while the next is made).
++constexpr int kMaxLinks = 4;
++LinkState sLinks[kMaxLinks];
++
++// A copy that is replaced may still be named by the frame's draw lists and by GX commands not yet
++// drawn: it is kept a few frames. Fixed arrays: these run on the game thread inside the game's
++// heaps' scopes, where a growing container would take blocks of whatever JKRHeap is current.
++struct Retired {
++    Copy copy;
++    unsigned int frame = 0;
++};
++constexpr int kMaxRetired = 16;
++constexpr unsigned int kRetireFrames = 8;
++Retired sRetired[kMaxRetired];
++int sRetiredCount = 0;
++
++void freeCopy(Copy& copy) {
++    delete copy.texture; // host memory (JKRHeap's operator delete hands it back to the host)
++    if (copy.block != nullptr) {
++        JKRHeap::free(copy.block, copy.heap);
++    }
++    copy = Copy{};
++}
++
++void freeRetired() {
++    if (sRetiredCount == 0) {
++        return;
++    }
++    const unsigned int now = pc_frame_count();
++    for (Retired& r : sRetired) {
++        if (r.copy.texture != nullptr && now - r.frame > kRetireFrames) {
++            freeCopy(r.copy);
++            sRetiredCount--;
++        }
++    }
++}
++
++void retire(Copy& copy) {
++    if (copy.texture == nullptr) {
++        return;
++    }
++    Retired* slot = nullptr;
++    for (Retired& r : sRetired) {
++        if (r.copy.texture == nullptr) {
++            slot = &r;
++            break;
++        }
++        if (slot == nullptr || r.frame < slot->frame) {
++            slot = &r; // all in use: the oldest goes now
++        }
++    }
++    if (slot->copy.texture != nullptr) {
++        freeCopy(slot->copy);
++        sRetiredCount--;
++    }
++    slot->copy = copy;
++    slot->frame = pc_frame_count();
++    sRetiredCount++;
++    copy = Copy{};
++}
++
++LinkState* find(daPy_lk_c* link) {
++    for (LinkState& s : sLinks) {
++        if (s.link == link) {
++            return &s;
++        }
++    }
++    return nullptr;
++}
++
++bool isCopy(const J3DTexture* texture) {
++    for (const LinkState& s : sLinks) {
++        if (s.copy.texture != nullptr && s.copy.texture == texture) {
++            return true;
++        }
++    }
++    return false;
++}
++
++// The clothes entry: the second "linktexS3TC" of the body model's texture table, as
++// daPy_lk_c::playerInit finds it (the first header is an unused duplicate) and swaps the casual
++// clothes into it. Found by name, so a Link that leaves the shared entry to the other (split-screen's
++// second Link) finds it too. -1 if there is none.
++int clothesEntry(J3DModelData* modelData) {
++    static const J3DTexture* sTexture = nullptr;
++    static const JUTNameTab* sNames = nullptr;
++    static int sEntry = -1;
++    J3DTexture* texture = modelData->getTexture();
++    JUTNameTab* names = modelData->getTextureName();
++    if (texture != sTexture || names != sNames) {
++        sTexture = texture;
++        sNames = names;
++        sEntry = -1;
++        int seen = 0;
++        for (u16 i = 0; names != nullptr && i < texture->getNum(); i++) {
++            const char* name = names->getName(i);
++            if (name != nullptr && strcmp(name, "linktexS3TC") == 0 && seen++ == 1) {
++                sEntry = i;
++                break;
++            }
++        }
++    }
++    return sEntry;
++}
++
++// The original table with entry `entry` recoloured. The headers are copied with their offsets
++// moved to the copy (the same images, J3DTexture::setResTIMG's arithmetic), so they live in a game
++// heap: every JKRHeap is in the MEM1 arena, within the 32-bit reach of the model's images.
++bool makeCopy(Copy& out, J3DTexture* original, u16 entry, const Rgb& target, Outfit& outfit) {
++    const u16 num = original->getNum();
++    const ResTIMG* src = original->getResTIMG(entry);
++    size_t payload;
++    if (!src->indexTexture && src->format == GX_TF_CMPR) {
++        outfit = Outfit::Hero;
++        payload = GXGetTexBufferSize(src->width, src->height, GX_TF_CMPR, src->mipmapEnabled ? GX_TRUE : GX_FALSE,
++                                     src->mipmapCount);
++    } else if (src->indexTexture && (src->colorFormat == GX_TL_RGB565 || src->colorFormat == GX_TL_RGB5A3)) {
++        outfit = Outfit::Casual;
++        payload = (size_t)src->numColors * 2;
++    } else {
++        return false;
++    }
++    const size_t headers = (size_t)num * sizeof(ResTIMG);
++    JKRHeap* heap = mDoExt_getGameHeap();
++    u8* block = (u8*)JKRHeap::alloc((u32)(headers + ((payload + 0x1F) & ~(size_t)0x1F)), 0x20, heap);
++    if (block == nullptr) {
++        return false;
++    }
++    ResTIMG* res = (ResTIMG*)block;
++    for (u16 i = 0; i < num; i++) {
++        const ResTIMG* o = original->getResTIMG(i);
++        res[i] = *o;
++        const intptr_t delta = (intptr_t)o - (intptr_t)&res[i];
++        const bool reach = delta == (intptr_t)(s32)delta;
++        res[i].imageOffset = (u32)o->imageOffset + (u32)(s32)delta;
++        res[i].paletteOffset = (u32)o->paletteOffset + (u32)(s32)delta;
++        if (!reach || imageOf(&res[i]) != imageOf(o) || (o->indexTexture && paletteOf(&res[i]) != paletteOf(o))) {
++            JKRHeap::free(block, heap);
++            return false;
++        }
++    }
++    u8* data = block + headers;
++    if (outfit == Outfit::Hero) {
++        memcpy(data, imageOf(src), payload);
++        recolorCmpr(data, payload, target);
++        res[entry].imageOffset = (u32)(data - (u8*)&res[entry]);
++    } else {
++        memcpy(data, paletteOf(src), payload);
++        recolorTlut(data, src->numColors, src->colorFormat, target);
++        res[entry].paletteOffset = (u32)(data - (u8*)&res[entry]);
++    }
++    {
++        // The constructor builds a texture object per entry from the headers just written.
++        JKRPcHostAllocScope host;
++        out.texture = new J3DTexture(num, res);
++    }
++    out.block = block;
++    out.heap = heap;
++    return true;
++}
++
++} // namespace
++
++void pc_ss_tunic_apply(daPy_lk_c* link, int player) {
++    if (link == nullptr || player < 0 || player > 1) {
++        return;
++    }
++    const int preset = presetFor(player);
++    LinkState* s = find(link);
++    if (preset == 0 && s == nullptr && sRetiredCount == 0) {
++        return; // the game's colours, and nothing of ours to free
++    }
++    freeRetired();
++    J3DModelData* modelData = link->pcBodyModelData();
++    J3DTexture* original = modelData != nullptr ? modelData->getTexture() : nullptr;
++    const int entry = original != nullptr && !isCopy(original) ? clothesEntry(modelData) : -1;
++    const ResTIMG* clothes = entry >= 0 ? original->getResTIMG((u16)entry) : nullptr;
++    if (preset == 0 || clothes == nullptr || (!clothes->indexTexture && kPresets[preset].gameHero)) {
++        if (s != nullptr) {
++            retire(s->copy);
++            *s = LinkState{};
++        }
++        return;
++    }
++    if (s == nullptr) {
++        s = find(nullptr);
++        if (s == nullptr) {
++            return;
++        }
++        s->link = link;
++    }
++    const u8* image = imageOf(clothes);
++    const u8* palette = clothes->indexTexture ? paletteOf(clothes) : nullptr;
++    if (s->preset != preset || s->original != original || s->num != original->getNum() || s->entry != entry ||
++        s->image != image || s->palette != palette || s->format != clothes->format)
++    {
++        retire(s->copy);
++        s->preset = preset;
++        s->original = original;
++        s->num = original->getNum();
++        s->entry = (u16)entry;
++        s->image = image;
++        s->palette = palette;
++        s->format = clothes->format;
++        Outfit outfit = Outfit::Hero;
++        const bool made = makeCopy(s->copy, original, (u16)entry, kPresets[preset].color, outfit);
++        pc::writef(STDERR_FILENO, "[cos] split-screen tunic: player %d's Link: %s on the %s clothes (entry %d)%s\n",
++                   player + 1, kPresets[preset].value, outfit == Outfit::Hero ? "hero's" : "casual",
++                   (int)entry, made ? "" : ": not recoloured (format or memory)");
++    }
++    if (s->copy.texture != nullptr) {
++        s->swappedData = modelData;
++        s->swappedFrom = original;
++        modelData->setTexture(s->copy.texture);
++    }
++}
++
++void pc_ss_tunic_restore(daPy_lk_c* link) {
++    LinkState* s = find(link);
++    if (s == nullptr || s->swappedData == nullptr) {
++        return;
++    }
++    // The frozen material's backup (dMat_control_c::push/pop) gives the copy back within the draw.
++    if (s->swappedData->getTexture() == s->copy.texture) {
++        s->swappedData->setTexture(s->swappedFrom);
++    }
++    s->swappedData = nullptr;
++    s->swappedFrom = nullptr;
++}
++
++void pc_ss_tunic_on_link_delete(daPy_lk_c* link) {
++    LinkState* s = find(link);
++    if (s == nullptr) {
++        return;
++    }
++    pc_ss_tunic_restore(link);
++    retire(s->copy);
++    *s = LinkState{};
++}
++
++void pc_ss_tunic_on_scene_delete() {
++    for (LinkState& s : sLinks) {
++        if (s.link != nullptr) {
++            pc_ss_tunic_on_link_delete(s.link);
++        }
++    }
++    freeRetired();
++}
+diff --git a/native/src/pc/runtime/pc_frame.cpp b/native/src/pc/runtime/pc_frame.cpp
+index 60577cc..2954a11 100644
+--- a/native/src/pc/runtime/pc_frame.cpp
++++ b/native/src/pc/runtime/pc_frame.cpp
+@@ -30,6 +30,7 @@
+ // clock instead of SDL_GetTicksNS; only the macOS sleep is kept (other hosts use nanosleep plus
+ // the same spin); no frame-usage statistics, interpolation, turbo mode or settings; a refused
+ // aurora_begin_frame waits and retries instead of skipping the game frame.
++#include "pc/pc_splitscreen.h"
+ #include "pc_internal.h"
+ #include "pc_fps60_budget.h"
+ #include "pc/game_hooks.h"
+@@ -1310,6 +1311,10 @@ static int sFps60Forced = -2; // COS_FPS60_TEST: 1/0, -1 unset; -2 not read yet
+ static int sFps60Setting = -1; // COS_FPS60; -1 not read yet
+ 
+ int pc_fps60_test(void) {
++    // Split-screen co-op (pc_splitscreen.h): the interpolation follows one camera; off with two.
++    if (pc_ss_enabled()) {
++        return 0;
++    }
+     if (sFps60Forced == -2) {
+         const char* v = getenv("COS_FPS60_TEST");
+         sFps60Forced = v != nullptr && (v[0] == '1' || v[0] == '0') ? v[0] - '0' : -1;
+@@ -1373,6 +1378,11 @@ unsigned int pc_frame_wait_retraces(unsigned int retraces) {
+ }
+ 
+ int pc_frame_split(void) {
++    // Split-screen co-op: no paint B (see pc_fps60_test), also in the frame the setting changes.
++    if (pc_ss_enabled()) {
++        sHalvedWait = false;
++        return 0;
++    }
+     // Paint B allowed (pc_fps60_camera.cpp): no scene change, overlap, wipe, fade or load in
+     // progress, nor a scene created in the last frames. Asked every frame (it keeps a cool-down).
+     const bool allowed = !pc_fps60_test() || pc_fps60_paint_b_allowed();
+diff --git a/native/src/pc/runtime/pc_main.cpp b/native/src/pc/runtime/pc_main.cpp
+index 0a822c8..6a5efc7 100644
+--- a/native/src/pc/runtime/pc_main.cpp
++++ b/native/src/pc/runtime/pc_main.cpp
+@@ -23,6 +23,7 @@
+ #include "pc_internal.h"
+ #include "pc/pc_hd_textures.h"
+ #include "pc/pc_aspect.h"
++#include "pc/pc_splitscreen.h"
+ 
+ #include "JSystem/JKernel/JKRHeap.h"
+ #include "m_Do/m_Do_audio.h"
+@@ -309,6 +310,8 @@ void pc_aurora_init(int argc, char* argv[]) {
+     precompileLoadingScreen();
+     // COS_HD_TEXTURES (pc_hd_textures.h): the optional HD texture pack, off by default.
+     pc_hd_textures_init(sUserPath);
++    // Split-screen co-op (pc_splitscreen.h): its setting.
++    pc_ss_init();
+ 
+     // Before DVDInit (Aurora's rule); pc_harness_init already checked COS_DISC is set and readable.
+     if (!aurora_dvd_open(gConfig.disc)) {

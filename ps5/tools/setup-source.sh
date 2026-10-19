@@ -36,6 +36,18 @@ if [[ -s $patch ]] && ! git -C "$upstream" apply --reverse --check "$patch" 2>/d
     echo "setup-source.sh: applied switchwaker.patch" >&2
 fi
 
+# Split-screen co-op (vendor/switchwaker/docs/SPLITSCREEN.md once applied), on top of the console
+# patch.
+patch="$root/ps5/patches/splitscreen.patch"
+if [[ -s $patch ]] && ! git -C "$upstream" apply --reverse --check "$patch" 2>/dev/null; then
+    git -C "$upstream" apply --check "$patch" || {
+        echo "setup-source.sh: splitscreen.patch does not apply to $upstream (after switchwaker.patch)" >&2
+        exit 2
+    }
+    git -C "$upstream" apply --whitespace=nowarn "$patch"
+    echo "setup-source.sh: applied splitscreen.patch" >&2
+fi
+
 # Aurora
 aurora="$deps/aurora"
 pin=$(sed -n 's/^set(COS_AURORA_COMMIT "\([0-9a-f]\{40\}\)".*/\1/p' "$upstream/native/cmake/Aurora.cmake")

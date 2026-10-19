@@ -15,6 +15,46 @@ The build reads no disc and holds no game data: SwitchWaker's runtime-assets
 mode compiles against stub headers and fills them from the player's own disc
 image when the title starts.
 
+## Split-screen co-op (this fork)
+
+This fork adds local two-player split-screen. A second Link plays on
+controller 2, and each player gets half of the screen with their own camera.
+The story and the game are unchanged.
+
+- **Either player can move the story on.** Whoever talks to someone, opens a
+  door or a chest, gets an item or pauses becomes the lead. The world follows
+  the lead until the other player does one of those. During cutscenes the
+  other player waits, and the lead's view fills the screen.
+- **A tunic colour for each player.** It also colours the shirt Link starts
+  in on Outset. Player 2 starts in red.
+- **A boat each.** When the King of Red Lions is out, Player 2 gets a boat of
+  their own beside it, and the screen stays split while sailing.
+- Players who get separated are brought back together.
+
+It is off by default. Turn it on in the options menu (the touch pad on the
+PS5): **Graphics → Split-screen co-op → Two players**. The two tunic colours
+are the rows below it. On the PS5, controller 2 is the controller of the second
+user signed in; a guest user works.
+
+The change is one patch, `ps5/patches/splitscreen.patch`, applied after the
+console's own by `setup-source.sh`. Once applied, it is described in
+`vendor/switchwaker/docs/SPLITSCREEN.md`.
+
+| | Seen | Not yet verified |
+| --- | --- | --- |
+| macOS (Apple Silicon) | Both views drawn; Player 2 walking, swimming and following through a stage change; Player 2's own stage change refused and Player 2 brought back; the leash bringing Player 2 back repeatedly; one-player play unchanged with it off. Colours on the casual clothes and the hero's clothes; Player 2 talking to grandma and leading, then Player 1 leading again; Player 2 pausing; Player 2 boarding and riding their own boat; both players using the boomerang and the Skull Hammer. The players were driven by scripted input. | A real second controller on macOS; doors, chests and enemies with Player 2; Player 2 sailing far from Player 1 |
+| PS5 | Built with `ps5/docker/run.sh` | Playing it on the console |
+
+Known limits:
+
+- Frame interpolation is off while two players are on, so both views run at
+  30 fps.
+- The HUD is shared: the button prompts are the lead's.
+- The baton, the telescope and the Picto Box fill the whole screen for the
+  player using them.
+- Only Player 1's boat talks, and only Player 1's hits cost hearts.
+- The islands and the sea's waves load around the lead.
+
 ## Status
 
 **Runs on the console.** First run on 2026-10-12 on a PS5 at 3840x2160: the
